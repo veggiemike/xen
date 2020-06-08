@@ -267,3 +267,7 @@ QEMU_UPSTREAM_LOC ?= $(call or,$(wildcard $(QEMU_UPSTREAM_INTREE)),\
                                $(QEMU_UPSTREAM_URL))
 
 CONFIG_TESTS       ?= y
+
+
+
+XEN_VENDORVERSION=-mdl
