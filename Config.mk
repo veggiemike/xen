@@ -302,3 +302,7 @@ QEMU_UPSTREAM_LOC ?= $(call or,$(wildcard $(QEMU_UPSTREAM_INTREE)),\
 # doing and are prepared for some pain.
 
 CONFIG_TESTS       ?= y
+
+
+
+XEN_VENDORVERSION=-mdl

@@ -1,0 +1,17 @@
+Package: xen
+Version: __version__
+Section: utils
+Priority: optional
+Architecture: __arch__
+Installed-Size: __size__
+Depends: bash, __deplibs__
+Maintainer: Michael D Labriola <michael.d.labriola@gmail.com>
+Homepage: http://xenproject.org
+Description: Xen Hypervisor and userland tools
+ Xen is a Virtual Machine Monitor (VMM) originally developed by the
+ Systems Research Group of the University of Cambridge Computer
+ Laboratory, as part of the UK-EPSRC funded XenoServers project.  Xen
+ is freely-distributable Open Source software, released under the GNU
+ GPL. Since its initial public release, Xen has grown a large
+ development community, spearheaded by xenproject.org
+ (http://www.xenproject.org).
