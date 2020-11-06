@@ -68,7 +68,7 @@
 #define GET_PC8_RES(val)  GET_HW_RES_IN_NS(0x630, val) /* some Haswells only */
 #define GET_PC9_RES(val)  GET_HW_RES_IN_NS(0x631, val) /* some Haswells only */
 #define GET_PC10_RES(val) GET_HW_RES_IN_NS(0x632, val) /* some Haswells only */
-#define GET_CC1_RES(val)  GET_HW_RES_IN_NS(0x660, val) /* Silvermont only */
+#define GET_CC1_RES(val)  GET_HW_RES_IN_NS(0x660, val)
 #define GET_CC3_RES(val)  GET_HW_RES_IN_NS(0x3FC, val)
 #define GET_CC6_RES(val)  GET_HW_RES_IN_NS(0x3FD, val)
 #define GET_CC7_RES(val)  GET_HW_RES_IN_NS(0x3FE, val) /* SNB onwards */
@@ -179,11 +179,15 @@ static void do_get_hw_residencies(void *arg)
     case 0x4E:
     case 0x55:
     case 0x5E:
-    /* Cannon Lake */
-    case 0x66:
+    /* Ice Lake */
+    case 0x7D:
+    case 0x7E:
     /* Kaby Lake */
     case 0x8E:
     case 0x9E:
+    /* Comet Lake */
+    case 0xA5:
+    case 0xA6:
         GET_PC2_RES(hw_res->pc2);
         GET_CC7_RES(hw_res->cc7);
         /* fall through */
@@ -201,6 +205,16 @@ static void do_get_hw_residencies(void *arg)
         GET_PC7_RES(hw_res->pc7);
         GET_CC3_RES(hw_res->cc3);
         GET_CC6_RES(hw_res->cc6);
+        break;
+    /* Cannon Lake */
+    case 0x66:
+        GET_PC2_RES(hw_res->pc2);
+        GET_PC3_RES(hw_res->pc3);
+        GET_PC6_RES(hw_res->pc6);
+        GET_PC7_RES(hw_res->pc7);
+        GET_CC1_RES(hw_res->cc1);
+        GET_CC6_RES(hw_res->cc6);
+        GET_CC7_RES(hw_res->cc7);
         break;
     /* Xeon Phi Knights Landing */
     case 0x57:
@@ -537,26 +551,73 @@ void trace_exit_reason(u32 *irq_traced)
     }
 }
 
-/*
- * "AAJ72. EOI Transaction May Not be Sent if Software Enters Core C6 During 
- * an Interrupt Service Routine"
- * 
- * There was an errata with some Core i7 processors that an EOI transaction 
- * may not be sent if software enters core C6 during an interrupt service 
- * routine. So we don't enter deep Cx state if there is an EOI pending.
- */
-static bool errata_c6_eoi_workaround(void)
+bool errata_c6_workaround(void)
 {
-    static int8_t fix_needed = -1;
+    static int8_t __read_mostly fix_needed = -1;
 
     if ( unlikely(fix_needed == -1) )
     {
-        int model = boot_cpu_data.x86_model;
-        fix_needed = (cpu_has_apic && !directed_eoi_enabled &&
-                      (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL) &&
-                      (boot_cpu_data.x86 == 6) &&
-                      ((model == 0x1a) || (model == 0x1e) || (model == 0x1f) ||
-                       (model == 0x25) || (model == 0x2c) || (model == 0x2f)));
+#define INTEL_FAM6_MODEL(m) { X86_VENDOR_INTEL, 6, m, X86_FEATURE_ALWAYS }
+        /*
+         * Errata AAJ72: EOI Transaction May Not be Sent if Software Enters
+         * Core C6 During an Interrupt Service Routine"
+         *
+         * There was an errata with some Core i7 processors that an EOI
+         * transaction may not be sent if software enters core C6 during an
+         * interrupt service routine. So we don't enter deep Cx state if
+         * there is an EOI pending.
+         */
+        static const struct x86_cpu_id eoi_errata[] = {
+            INTEL_FAM6_MODEL(0x1a),
+            INTEL_FAM6_MODEL(0x1e),
+            INTEL_FAM6_MODEL(0x1f),
+            INTEL_FAM6_MODEL(0x25),
+            INTEL_FAM6_MODEL(0x2c),
+            INTEL_FAM6_MODEL(0x2f),
+            { }
+        };
+        /*
+         * Errata BDX99, CLX30, SKX100, CFW125, BDF104, BDH85, BDM135, KWB131:
+         * A Pending Fixed Interrupt May Be Dispatched Before an Interrupt of
+         * The Same Priority Completes.
+         *
+         * Resuming from C6 Sleep-State, with Fixed Interrupts of the same
+         * priority queued (in the corresponding bits of the IRR and ISR APIC
+         * registers), the processor may dispatch the second interrupt (from
+         * the IRR bit) before the first interrupt has completed and written to
+         * the EOI register, causing the first interrupt to never complete.
+         *
+         * Note: Haswell hasn't had errata issued, but this issue was first
+         * discovered on Haswell hardware, and is affected.
+         */
+        static const struct x86_cpu_id isr_errata[] = {
+            /* Haswell */
+            INTEL_FAM6_MODEL(0x3c),
+            INTEL_FAM6_MODEL(0x3f),
+            INTEL_FAM6_MODEL(0x45),
+            INTEL_FAM6_MODEL(0x46),
+            /* Broadwell */
+            INTEL_FAM6_MODEL(0x47),
+            INTEL_FAM6_MODEL(0x3d),
+            INTEL_FAM6_MODEL(0x4f),
+            INTEL_FAM6_MODEL(0x56),
+            /* Skylake (client) */
+            INTEL_FAM6_MODEL(0x5e),
+            INTEL_FAM6_MODEL(0x4e),
+            /* {Sky/Cascade}lake (server) */
+            INTEL_FAM6_MODEL(0x55),
+            /* {Kaby/Coffee/Whiskey/Amber} Lake */
+            INTEL_FAM6_MODEL(0x9e),
+            INTEL_FAM6_MODEL(0x8e),
+            /* Cannon Lake */
+            INTEL_FAM6_MODEL(0x66),
+            { }
+        };
+#undef INTEL_FAM6_MODEL
+
+        fix_needed = cpu_has_apic &&
+                     ((!directed_eoi_enabled && x86_match_cpu(eoi_errata)) ||
+                      x86_match_cpu(isr_errata));
     }
 
     return (fix_needed && cpu_has_pending_apic_eoi());
@@ -664,7 +725,7 @@ static void acpi_processor_idle(void)
         return;
     }
 
-    if ( (cx->type == ACPI_STATE_C3) && errata_c6_eoi_workaround() )
+    if ( (cx->type >= ACPI_STATE_C3) && errata_c6_workaround() )
         cx = power->safe_state;
 
 

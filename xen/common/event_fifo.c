@@ -225,8 +225,8 @@ static void evtchn_fifo_set_pending(struct vcpu *v, struct evtchn *evtchn)
         /* Moved to a different queue? */
         if ( old_q != q )
         {
-            evtchn->last_vcpu_id = evtchn->notify_vcpu_id;
-            evtchn->last_priority = evtchn->priority;
+            evtchn->last_vcpu_id = v->vcpu_id;
+            evtchn->last_priority = q->priority;
 
             spin_unlock_irqrestore(&old_q->lock, flags);
             spin_lock_irqsave(&q->lock, flags);
@@ -296,23 +296,26 @@ static void evtchn_fifo_unmask(struct domain *d, struct evtchn *evtchn)
         evtchn_fifo_set_pending(v, evtchn);
 }
 
-static bool evtchn_fifo_is_pending(const struct domain *d, evtchn_port_t port)
+static bool evtchn_fifo_is_pending(const struct domain *d,
+                                   const struct evtchn *evtchn)
 {
-    const event_word_t *word = evtchn_fifo_word_from_port(d, port);
+    const event_word_t *word = evtchn_fifo_word_from_port(d, evtchn->port);
 
     return word && guest_test_bit(d, EVTCHN_FIFO_PENDING, word);
 }
 
-static bool_t evtchn_fifo_is_masked(const struct domain *d, evtchn_port_t port)
+static bool_t evtchn_fifo_is_masked(const struct domain *d,
+                                    const struct evtchn *evtchn)
 {
-    const event_word_t *word = evtchn_fifo_word_from_port(d, port);
+    const event_word_t *word = evtchn_fifo_word_from_port(d, evtchn->port);
 
     return !word || guest_test_bit(d, EVTCHN_FIFO_MASKED, word);
 }
 
-static bool_t evtchn_fifo_is_busy(const struct domain *d, evtchn_port_t port)
+static bool_t evtchn_fifo_is_busy(const struct domain *d,
+                                  const struct evtchn *evtchn)
 {
-    const event_word_t *word = evtchn_fifo_word_from_port(d, port);
+    const event_word_t *word = evtchn_fifo_word_from_port(d, evtchn->port);
 
     return word && guest_test_bit(d, EVTCHN_FIFO_LINKED, word);
 }
@@ -478,7 +481,7 @@ static void cleanup_event_array(struct domain *d)
     d->evtchn_fifo = NULL;
 }
 
-static void setup_ports(struct domain *d)
+static void setup_ports(struct domain *d, unsigned int prev_evtchns)
 {
     unsigned int port;
 
@@ -488,7 +491,7 @@ static void setup_ports(struct domain *d)
      * - save its pending state.
      * - set default priority.
      */
-    for ( port = 1; port < d->max_evtchns; port++ )
+    for ( port = 1; port < prev_evtchns; port++ )
     {
         struct evtchn *evtchn;
 
@@ -546,6 +549,8 @@ int evtchn_fifo_init_control(struct evtchn_init_control *init_control)
     if ( !d->evtchn_fifo )
     {
         struct vcpu *vcb;
+        /* Latch the value before it changes during setup_event_array(). */
+        unsigned int prev_evtchns = max_evtchns(d);
 
         for_each_vcpu ( d, vcb ) {
             rc = setup_control_block(vcb);
@@ -562,8 +567,7 @@ int evtchn_fifo_init_control(struct evtchn_init_control *init_control)
             goto error;
 
         d->evtchn_port_ops = &evtchn_port_ops_fifo;
-        d->max_evtchns = EVTCHN_FIFO_NR_CHANNELS;
-        setup_ports(d);
+        setup_ports(d, prev_evtchns);
     }
     else
         rc = map_control_block(v, gfn, offset);

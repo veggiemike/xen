@@ -38,45 +38,49 @@ static unsigned int pfn_to_pde_idx(unsigned long pfn, unsigned int level)
 static unsigned int clear_iommu_pte_present(unsigned long l1_mfn,
                                             unsigned long dfn)
 {
-    struct amd_iommu_pte *table, *pte;
+    union amd_iommu_pte *table, *pte;
     unsigned int flush_flags;
 
     table = map_domain_page(_mfn(l1_mfn));
     pte = &table[pfn_to_pde_idx(dfn, 1)];
 
     flush_flags = pte->pr ? IOMMU_FLUSHF_modified : 0;
-    memset(pte, 0, sizeof(*pte));
+    write_atomic(&pte->raw, 0);
 
     unmap_domain_page(table);
 
     return flush_flags;
 }
 
-static unsigned int set_iommu_pde_present(struct amd_iommu_pte *pte,
+static unsigned int set_iommu_pde_present(union amd_iommu_pte *pte,
                                           unsigned long next_mfn,
                                           unsigned int next_level, bool iw,
                                           bool ir)
 {
+    union amd_iommu_pte new = {}, old;
     unsigned int flush_flags = IOMMU_FLUSHF_added;
-
-    if ( pte->pr &&
-         (pte->mfn != next_mfn ||
-          pte->iw != iw ||
-          pte->ir != ir ||
-          pte->next_level != next_level) )
-            flush_flags |= IOMMU_FLUSHF_modified;
 
     /*
      * FC bit should be enabled in PTE, this helps to solve potential
      * issues with ATS devices
      */
-    pte->fc = !next_level;
+    new.fc = !next_level;
 
-    pte->mfn = next_mfn;
-    pte->iw = iw;
-    pte->ir = ir;
-    pte->next_level = next_level;
-    pte->pr = 1;
+    new.mfn = next_mfn;
+    new.iw = iw;
+    new.ir = ir;
+    new.next_level = next_level;
+    new.pr = true;
+
+    old.raw = read_atomic(&pte->raw);
+    old.ign0 = 0;
+    old.ign1 = 0;
+    old.ign2 = 0;
+
+    if ( old.pr && old.raw != new.raw )
+        flush_flags |= IOMMU_FLUSHF_modified;
+
+    write_atomic(&pte->raw, new.raw);
 
     return flush_flags;
 }
@@ -87,7 +91,7 @@ static unsigned int set_iommu_pte_present(unsigned long pt_mfn,
                                           int pde_level,
                                           bool iw, bool ir)
 {
-    struct amd_iommu_pte *table, *pde;
+    union amd_iommu_pte *table, *pde;
     unsigned int flush_flags;
 
     table = map_domain_page(_mfn(pt_mfn));
@@ -103,11 +107,18 @@ void amd_iommu_set_root_page_table(struct amd_iommu_dte *dte,
                                    uint64_t root_ptr, uint16_t domain_id,
                                    uint8_t paging_mode, bool valid)
 {
+    if ( valid || dte->v )
+    {
+        dte->tv = false;
+        dte->v = true;
+        smp_wmb();
+    }
     dte->domain_id = domain_id;
     dte->pt_root = paddr_to_pfn(root_ptr);
     dte->iw = true;
     dte->ir = true;
     dte->paging_mode = paging_mode;
+    smp_wmb();
     dte->tv = true;
     dte->v = valid;
 }
@@ -130,6 +141,7 @@ void amd_iommu_set_intremap_table(
     }
 
     dte->ig = false; /* unmapped interrupts result in i/o page faults */
+    smp_wmb();
     dte->iv = valid;
 }
 
@@ -178,7 +190,7 @@ void iommu_dte_set_guest_cr3(struct amd_iommu_dte *dte, uint16_t dom_id,
 static int iommu_pde_from_dfn(struct domain *d, unsigned long dfn,
                               unsigned long pt_mfn[], bool map)
 {
-    struct amd_iommu_pte *pde, *next_table_vaddr;
+    union amd_iommu_pte *pde, *next_table_vaddr;
     unsigned long  next_table_mfn;
     unsigned int level;
     struct page_info *table;
@@ -458,7 +470,7 @@ int __init amd_iommu_quarantine_init(struct domain *d)
     unsigned long end_gfn =
         1ul << (DEFAULT_DOMAIN_ADDRESS_WIDTH - PAGE_SHIFT);
     unsigned int level = amd_iommu_get_paging_mode(end_gfn);
-    struct amd_iommu_pte *table;
+    union amd_iommu_pte *table;
 
     if ( hd->arch.root_table )
     {
@@ -489,7 +501,7 @@ int __init amd_iommu_quarantine_init(struct domain *d)
 
         for ( i = 0; i < PTE_PER_TABLE_SIZE; i++ )
         {
-            struct amd_iommu_pte *pde = &table[i];
+            union amd_iommu_pte *pde = &table[i];
 
             /*
              * PDEs are essentially a subset of PTEs, so this function

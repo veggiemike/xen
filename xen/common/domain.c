@@ -298,6 +298,12 @@ static int sanitise_domain_config(struct xen_domctl_createdomain *config)
         return -EINVAL;
     }
 
+    if ( config->iommu_opts & ~XEN_DOMCTL_IOMMU_no_sharept )
+    {
+        dprintk(XENLOG_INFO, "Unknown IOMMU options %#x\n", config->iommu_opts);
+        return -EINVAL;
+    }
+
     if ( !(config->flags & XEN_DOMCTL_CDF_iommu) && config->iommu_opts )
     {
         dprintk(XENLOG_INFO,
@@ -770,12 +776,14 @@ int domain_kill(struct domain *d)
             return domain_kill(d);
         d->is_dying = DOMDYING_dying;
         argo_destroy(d);
-        evtchn_destroy(d);
         gnttab_release_mappings(d);
         vnuma_destroy(d->vnuma);
         domain_set_outstanding_pages(d, 0);
         /* fallthrough */
     case DOMDYING_dying:
+        rc = evtchn_destroy(d);
+        if ( rc )
+            break;
         rc = domain_relinquish_resources(d);
         if ( rc != 0 )
             break;
@@ -1212,7 +1220,7 @@ void domain_unpause_except_self(struct domain *d)
         domain_unpause(d);
 }
 
-int domain_soft_reset(struct domain *d)
+int domain_soft_reset(struct domain *d, bool resuming)
 {
     struct vcpu *v;
     int rc;
@@ -1226,7 +1234,7 @@ int domain_soft_reset(struct domain *d)
         }
     spin_unlock(&d->shutdown_lock);
 
-    rc = evtchn_reset(d);
+    rc = evtchn_reset(d, resuming);
     if ( rc )
         return rc;
 
@@ -1300,8 +1308,18 @@ int map_vcpu_info(struct vcpu *v, unsigned long gfn, unsigned offset)
     void *mapping;
     vcpu_info_t *new_info;
     struct page_info *page;
+    unsigned int align;
 
     if ( offset > (PAGE_SIZE - sizeof(vcpu_info_t)) )
+        return -EINVAL;
+
+#ifdef CONFIG_COMPAT
+    if ( has_32bit_shinfo(d) )
+        align = alignof(new_info->compat);
+    else
+#endif
+        align = alignof(*new_info);
+    if ( offset & (align - 1) )
         return -EINVAL;
 
     if ( !mfn_eq(v->vcpu_info_mfn, INVALID_MFN) )

@@ -96,6 +96,22 @@ int init_domain_msr_policy(struct domain *d)
     if ( !opt_dom0_cpuid_faulting && is_control_domain(d) && is_pv_domain(d) )
         mp->platform_info.cpuid_faulting = false;
 
+    /*
+     * Expose the "hardware speculation behaviour" bits of ARCH_CAPS to dom0,
+     * so dom0 can turn off workarounds as appropriate.  Temporary, until the
+     * domain policy logic gains a better understanding of MSRs.
+     */
+    if ( is_hardware_domain(d) && boot_cpu_has(X86_FEATURE_ARCH_CAPS) )
+    {
+        uint64_t val;
+
+        rdmsrl(MSR_ARCH_CAPABILITIES, val);
+
+        mp->arch_caps.raw = val &
+            (ARCH_CAPS_RDCL_NO | ARCH_CAPS_IBRS_ALL | ARCH_CAPS_RSBA |
+             ARCH_CAPS_SSB_NO | ARCH_CAPS_MDS_NO | ARCH_CAPS_TAA_NO);
+    }
+
     d->arch.msr = mp;
 
     return 0;
@@ -134,6 +150,8 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         /* Write-only */
     case MSR_TSX_FORCE_ABORT:
     case MSR_TSX_CTRL:
+    case MSR_MCU_OPT_CTRL:
+    case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
     case MSR_U_CET:
     case MSR_S_CET:
     case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:
@@ -181,8 +199,10 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         break;
 
     case MSR_ARCH_CAPABILITIES:
-        /* Not implemented yet. */
-        goto gp_fault;
+        if ( !cp->feat.arch_caps )
+            goto gp_fault;
+        *val = mp->arch_caps.raw;
+        break;
 
     case MSR_INTEL_MISC_FEATURES_ENABLES:
         *val = msrs->misc_features_enables.raw;
@@ -288,6 +308,8 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
         /* Read-only */
     case MSR_TSX_FORCE_ABORT:
     case MSR_TSX_CTRL:
+    case MSR_MCU_OPT_CTRL:
+    case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
     case MSR_U_CET:
     case MSR_S_CET:
     case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:

@@ -31,6 +31,7 @@
 #include <xen/pci_regs.h>
 #include <xen/keyhandler.h>
 #include <asm/msi.h>
+#include <asm/nops.h>
 #include <asm/irq.h>
 #include <asm/hvm/vmx/vmx.h>
 #include <asm/p2m.h>
@@ -140,10 +141,11 @@ static int context_get_domain_id(struct context_entry *context,
 }
 
 static int iommus_incoherent;
-static void __iommu_flush_cache(void *addr, unsigned int size)
+
+static void sync_cache(const void *addr, unsigned int size)
 {
-    int i;
-    static unsigned int clflush_size = 0;
+    static unsigned long clflush_size = 0;
+    const void *end = addr + size;
 
     if ( !iommus_incoherent )
         return;
@@ -151,18 +153,44 @@ static void __iommu_flush_cache(void *addr, unsigned int size)
     if ( clflush_size == 0 )
         clflush_size = get_cache_line_size();
 
-    for ( i = 0; i < size; i += clflush_size )
-        cacheline_flush((char *)addr + i);
-}
+    addr -= (unsigned long)addr & (clflush_size - 1);
+    for ( ; addr < end; addr += clflush_size )
+/*
+ * The arguments to a macro must not include preprocessor directives. Doing so
+ * results in undefined behavior, so we have to create some defines here in
+ * order to avoid it.
+ */
+#if defined(HAVE_AS_CLWB)
+# define CLWB_ENCODING "clwb %[p]"
+#elif defined(HAVE_AS_XSAVEOPT)
+# define CLWB_ENCODING "data16 xsaveopt %[p]" /* clwb */
+#else
+# define CLWB_ENCODING ".byte 0x66, 0x0f, 0xae, 0x30" /* clwb (%%rax) */
+#endif
 
-void iommu_flush_cache_entry(void *addr, unsigned int size)
-{
-    __iommu_flush_cache(addr, size);
-}
+#define BASE_INPUT(addr) [p] "m" (*(const char *)(addr))
+#if defined(HAVE_AS_CLWB) || defined(HAVE_AS_XSAVEOPT)
+# define INPUT BASE_INPUT
+#else
+# define INPUT(addr) "a" (addr), BASE_INPUT(addr)
+#endif
+        /*
+         * Note regarding the use of NOP_DS_PREFIX: it's faster to do a clflush
+         * + prefix than a clflush + nop, and hence the prefix is added instead
+         * of letting the alternative framework fill the gap by appending nops.
+         */
+        alternative_io_2(".byte " __stringify(NOP_DS_PREFIX) "; clflush %[p]",
+                         "data16 clflush %[p]", /* clflushopt */
+                         X86_FEATURE_CLFLUSHOPT,
+                         CLWB_ENCODING,
+                         X86_FEATURE_CLWB, /* no outputs */,
+                         INPUT(addr));
+#undef INPUT
+#undef BASE_INPUT
+#undef CLWB_ENCODING
 
-void iommu_flush_cache_page(void *addr, unsigned long npages)
-{
-    __iommu_flush_cache(addr, PAGE_SIZE * npages);
+    alternative_2("", "sfence", X86_FEATURE_CLFLUSHOPT,
+                      "sfence", X86_FEATURE_CLWB);
 }
 
 /* Allocate page table, return its machine address */
@@ -183,7 +211,7 @@ uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node)
         vaddr = __map_domain_page(cur_pg);
         memset(vaddr, 0, PAGE_SIZE);
 
-        iommu_flush_cache_page(vaddr, 1);
+        sync_cache(vaddr, PAGE_SIZE);
         unmap_domain_page(vaddr);
         cur_pg++;
     }
@@ -216,7 +244,7 @@ static u64 bus_to_context_maddr(struct vtd_iommu *iommu, u8 bus)
         }
         set_root_value(*root, maddr);
         set_root_present(*root);
-        iommu_flush_cache_entry(root, sizeof(struct root_entry));
+        iommu_sync_cache(root, sizeof(struct root_entry));
     }
     maddr = (u64) get_context_addr(*root);
     unmap_vtd_domain_page(root_entries);
@@ -263,7 +291,7 @@ static u64 addr_to_dma_page_maddr(struct domain *domain, u64 addr, int alloc)
              */
             dma_set_pte_readable(*pte);
             dma_set_pte_writable(*pte);
-            iommu_flush_cache_entry(pte, sizeof(struct dma_pte));
+            iommu_sync_cache(pte, sizeof(struct dma_pte));
         }
 
         if ( level == 2 )
@@ -570,13 +598,14 @@ static int __must_check iommu_flush_iotlb(struct domain *d, dfn_t dfn,
         if ( iommu_domid == -1 )
             continue;
 
-        if ( page_count != 1 || dfn_eq(dfn, INVALID_DFN) )
+        if ( !page_count || (page_count & (page_count - 1)) ||
+             dfn_eq(dfn, INVALID_DFN) || !IS_ALIGNED(dfn_x(dfn), page_count) )
             rc = iommu_flush_iotlb_dsi(iommu, iommu_domid,
                                        0, flush_dev_iotlb);
         else
             rc = iommu_flush_iotlb_psi(iommu, iommu_domid,
                                        dfn_to_daddr(dfn),
-                                       PAGE_ORDER_4K,
+                                       get_order_from_pages(page_count),
                                        !dma_old_pte_present,
                                        flush_dev_iotlb);
 
@@ -639,7 +668,7 @@ static int __must_check dma_pte_clear_one(struct domain *domain, u64 addr,
     *flush_flags |= IOMMU_FLUSHF_modified;
 
     spin_unlock(&hd->arch.mapping_lock);
-    iommu_flush_cache_entry(pte, sizeof(struct dma_pte));
+    iommu_sync_cache(pte, sizeof(struct dma_pte));
 
     unmap_vtd_domain_page(page);
 
@@ -678,7 +707,7 @@ static void iommu_free_page_table(struct page_info *pg)
             iommu_free_pagetable(dma_pte_addr(*pte), next_level);
 
         dma_clear_pte(*pte);
-        iommu_flush_cache_entry(pte, sizeof(struct dma_pte));
+        iommu_sync_cache(pte, sizeof(struct dma_pte));
     }
 
     unmap_vtd_domain_page(pt_vaddr);
@@ -1399,7 +1428,7 @@ int domain_context_mapping_one(
     context_set_address_width(*context, agaw);
     context_set_fault_enable(*context);
     context_set_present(*context);
-    iommu_flush_cache_entry(context, sizeof(struct context_entry));
+    iommu_sync_cache(context, sizeof(struct context_entry));
     spin_unlock(&iommu->lock);
 
     /* Context entry was previously non-present (with domid 0). */
@@ -1563,7 +1592,7 @@ int domain_context_unmap_one(
 
     context_clear_present(*context);
     context_clear_entry(*context);
-    iommu_flush_cache_entry(context, sizeof(struct context_entry));
+    iommu_sync_cache(context, sizeof(struct context_entry));
 
     iommu_domid= domain_iommu_domid(domain, iommu);
     if ( iommu_domid == -1 )
@@ -1790,7 +1819,7 @@ static int __must_check intel_iommu_map_page(struct domain *d, dfn_t dfn,
 
     *pte = new;
 
-    iommu_flush_cache_entry(pte, sizeof(struct dma_pte));
+    iommu_sync_cache(pte, sizeof(struct dma_pte));
     spin_unlock(&hd->arch.mapping_lock);
     unmap_vtd_domain_page(page);
 
@@ -1853,53 +1882,6 @@ static int intel_iommu_lookup_page(struct domain *d, dfn_t dfn, mfn_t *mfn,
     *flags |= dma_pte_write(val) ? IOMMUF_writable : 0;
 
     return 0;
-}
-
-int iommu_pte_flush(struct domain *d, uint64_t dfn, uint64_t *pte,
-                    int order, int present)
-{
-    struct acpi_drhd_unit *drhd;
-    struct vtd_iommu *iommu = NULL;
-    struct domain_iommu *hd = dom_iommu(d);
-    bool_t flush_dev_iotlb;
-    int iommu_domid;
-    int rc = 0;
-
-    iommu_flush_cache_entry(pte, sizeof(struct dma_pte));
-
-    for_each_drhd_unit ( drhd )
-    {
-        iommu = drhd->iommu;
-        if ( !test_bit(iommu->index, &hd->arch.iommu_bitmap) )
-            continue;
-
-        flush_dev_iotlb = !!find_ats_dev_drhd(iommu);
-        iommu_domid= domain_iommu_domid(d, iommu);
-        if ( iommu_domid == -1 )
-            continue;
-
-        rc = iommu_flush_iotlb_psi(iommu, iommu_domid,
-                                   __dfn_to_daddr(dfn),
-                                   order, !present, flush_dev_iotlb);
-        if ( rc > 0 )
-        {
-            iommu_flush_write_buffer(iommu);
-            rc = 0;
-        }
-    }
-
-    if ( unlikely(rc) )
-    {
-        if ( !d->is_shutting_down && printk_ratelimit() )
-            printk(XENLOG_ERR VTDPREFIX
-                   " d%d: IOMMU pages flush failed: %d\n",
-                   d->domain_id, rc);
-
-        if ( !is_hardware_domain(d) )
-            domain_crash(d);
-    }
-
-    return rc;
 }
 
 static int __init vtd_ept_page_compatible(struct vtd_iommu *iommu)
@@ -2723,7 +2705,7 @@ static int __init intel_iommu_quarantine_init(struct domain *d)
             dma_set_pte_addr(*pte, maddr);
             dma_set_pte_readable(*pte);
         }
-        iommu_flush_cache_page(parent, 1);
+        iommu_sync_cache(parent, PAGE_SIZE);
 
         unmap_vtd_domain_page(parent);
         parent = map_vtd_domain_page(maddr);
@@ -2771,6 +2753,7 @@ const struct iommu_ops __initconstrel intel_iommu_ops = {
     .iotlb_flush_all = iommu_flush_iotlb_all,
     .get_reserved_device_memory = intel_iommu_get_reserved_device_memory,
     .dump_p2m_table = vtd_dump_p2m_table,
+    .sync_cache = sync_cache,
 };
 
 const struct iommu_init_ops __initconstrel intel_iommu_init_ops = {

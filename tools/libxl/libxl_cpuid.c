@@ -213,6 +213,7 @@ int libxl_cpuid_parse_config(libxl_cpuid_policy_list *cpuid, const char* str)
 
         {"avx512-4vnniw",0x00000007,  0, CPUID_REG_EDX,  2,  1},
         {"avx512-4fmaps",0x00000007,  0, CPUID_REG_EDX,  3,  1},
+        {"srbds-ctrl",   0x00000007,  0, CPUID_REG_EDX,  9,  1},
         {"md-clear",     0x00000007,  0, CPUID_REG_EDX, 10,  1},
         {"cet-ibt",      0x00000007,  0, CPUID_REG_EDX, 20,  1},
         {"ibrsb",        0x00000007,  0, CPUID_REG_EDX, 26,  1},
@@ -419,12 +420,17 @@ void libxl_cpuid_apply_policy(libxl_ctx *ctx, uint32_t domid)
 void libxl_cpuid_set(libxl_ctx *ctx, uint32_t domid,
                      libxl_cpuid_policy_list cpuid)
 {
-    int i;
+    int i, j;
     char *cpuid_res[4];
 
     for (i = 0; cpuid[i].input[0] != XEN_CPUID_INPUT_UNUSED; i++)
+    {
         xc_cpuid_set(ctx->xch, domid, cpuid[i].input,
                      (const char**)(cpuid[i].policy), cpuid_res);
+
+        for (j = 0; j < ARRAY_SIZE(cpuid_res); ++j)
+            free(cpuid_res[j]);
+    }
 }
 
 static const char *input_names[2] = { "leaf", "subleaf" };

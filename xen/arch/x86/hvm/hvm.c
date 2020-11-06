@@ -646,6 +646,8 @@ int hvm_domain_initialise(struct domain *d)
     /* need link to containing domain */
     d->arch.hvm.pl_time->domain = d;
 
+    rwlock_init(&d->arch.hvm.pl_time->pt_migrate);
+
     /* Set the default IO Bitmap. */
     if ( is_hardware_domain(d) )
     {
@@ -3790,7 +3792,7 @@ void hvm_ud_intercept(struct cpu_user_regs *regs)
         return;
     }
 
-    switch ( hvm_emulate_one(&ctxt) )
+    switch ( hvm_emulate_one(&ctxt, HVMIO_no_completion) )
     {
     case X86EMUL_UNHANDLEABLE:
     case X86EMUL_UNIMPLEMENTED:

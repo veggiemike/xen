@@ -10,6 +10,7 @@
 #include <asm/io.h>
 #include <asm/mpspec.h>
 #include <asm/apic.h>
+#include <asm/random.h>
 #include <asm/setup.h>
 #include <mach_apic.h>
 #include <public/sysctl.h> /* for XEN_INVALID_{SOCKET,CORE}_ID */
@@ -95,6 +96,11 @@ void __init setup_force_cpu_cap(unsigned int cap)
 	}
 
 	__set_bit(cap, boot_cpu_data.x86_capability);
+}
+
+bool __init is_forced_cpu_cap(unsigned int cap)
+{
+	return test_bit(cap, forced_caps);
 }
 
 static void default_init(struct cpuinfo_x86 * c)
@@ -487,8 +493,7 @@ void identify_cpu(struct cpuinfo_x86 *c)
 
 	/* Now the feature flags better reflect actual CPU features! */
 
-	if ( cpu_has_xsave )
-		xstate_init(c);
+	xstate_init(c);
 
 #ifdef NOISY_CAPS
 	printk(KERN_DEBUG "CPU: After all inits, caps:");
@@ -496,6 +501,27 @@ void identify_cpu(struct cpuinfo_x86 *c)
 		printk(" %08x", c->x86_capability[i]);
 	printk("\n");
 #endif
+
+	/*
+	 * If RDRAND is available, make an attempt to check that it actually
+	 * (still) works.
+	 */
+	if (cpu_has(c, X86_FEATURE_RDRAND)) {
+		unsigned int prev = 0;
+
+		for (i = 0; i < 5; ++i)
+		{
+			unsigned int cur = arch_get_random();
+
+			if (prev && cur != prev)
+				break;
+			prev = cur;
+		}
+
+		if (i >= 5)
+			printk(XENLOG_WARNING "CPU%u: RDRAND appears to not work\n",
+			       smp_processor_id());
+	}
 
 	if (system_state == SYS_STATE_resume)
 		return;
@@ -703,11 +729,12 @@ static cpumask_t cpu_initialized;
  */
 void load_system_tables(void)
 {
-	unsigned int cpu = smp_processor_id();
+	unsigned int i, cpu = smp_processor_id();
 	unsigned long stack_bottom = get_stack_bottom(),
 		stack_top = stack_bottom & ~(STACK_SIZE - 1);
 
-	struct tss64 *tss = &this_cpu(tss_page).tss;
+	/* The TSS may be live.	 Disuade any clever optimisations. */
+	volatile struct tss64 *tss = &this_cpu(tss_page).tss;
 	seg_desc_t *gdt =
 		this_cpu(gdt) - FIRST_RESERVED_GDT_ENTRY;
 	seg_desc_t *compat_gdt =
@@ -722,30 +749,26 @@ void load_system_tables(void)
 		.limit = (IDT_ENTRIES * sizeof(idt_entry_t)) - 1,
 	};
 
-	*tss = (struct tss64){
-		/* Main stack for interrupts/exceptions. */
-		.rsp0 = stack_bottom,
+	/*
+	 * Set up the TSS.  Warning - may be live, and the NMI/#MC must remain
+	 * valid on every instruction boundary.  (Note: these are all
+	 * semantically ACCESS_ONCE() due to tss's volatile qualifier.)
+	 *
+	 * rsp0 refers to the primary stack.  #MC, #DF, NMI and #DB handlers
+	 * each get their own stacks.  No IO Bitmap.
+	 */
+	tss->rsp0 = stack_bottom;
+	tss->ist[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE;
+	tss->ist[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE;
+	tss->ist[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE;
+	tss->ist[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE;
+	tss->bitmap = IOBMP_INVALID_OFFSET;
 
-		/* Ring 1 and 2 stacks poisoned. */
-		.rsp1 = 0x8600111111111111ul,
-		.rsp2 = 0x8600111111111111ul,
-
-		/*
-		 * MCE, NMI and Double Fault handlers get their own stacks.
-		 * All others poisoned.
-		 */
-		.ist = {
-			[IST_MCE - 1] = stack_top + IST_MCE * PAGE_SIZE,
-			[IST_DF  - 1] = stack_top + IST_DF  * PAGE_SIZE,
-			[IST_NMI - 1] = stack_top + IST_NMI * PAGE_SIZE,
-			[IST_DB  - 1] = stack_top + IST_DB  * PAGE_SIZE,
-
-			[IST_MAX ... ARRAY_SIZE(tss->ist) - 1] =
-				0x8600111111111111ul,
-		},
-
-		.bitmap = IOBMP_INVALID_OFFSET,
-	};
+	/* All other stack pointers poisioned. */
+	for ( i = IST_MAX; i < ARRAY_SIZE(tss->ist); ++i )
+		tss->ist[i] = 0x8600111111111111ul;
+	tss->rsp1 = 0x8600111111111111ul;
+	tss->rsp2 = 0x8600111111111111ul;
 
 	BUILD_BUG_ON(sizeof(*tss) <= 0x67); /* Mandated by the architecture. */
 

@@ -26,6 +26,7 @@
 #include <xen/keyhandler.h>
 #include <xen/guest_access.h>
 #include <asm/io.h>
+#include <asm/iocap.h>
 #include <asm/msr.h>
 #include <asm/mpspec.h>
 #include <asm/processor.h>
@@ -452,16 +453,13 @@ static u64 read_pmtimer_count(void)
 static s64 __init init_pmtimer(struct platform_timesource *pts)
 {
     u64 start;
-    u32 count, target, mask = 0xffffff;
+    u32 count, target, mask;
 
-    if ( !pmtmr_ioport || !pmtmr_width )
+    if ( !pmtmr_ioport || (pmtmr_width != 24 && pmtmr_width != 32) )
         return 0;
 
-    if ( pmtmr_width == 32 )
-    {
-        pts->counter_bits = 32;
-        mask = 0xffffffff;
-    }
+    pts->counter_bits = pmtmr_width;
+    mask = 0xffffffff >> (32 - pmtmr_width);
 
     count = inl(pmtmr_ioport) & mask;
     start = rdtsc_ordered();
@@ -481,7 +479,6 @@ static struct platform_timesource __initdata plt_pmtimer =
     .name = "ACPI PM Timer",
     .frequency = ACPI_PM_FREQUENCY,
     .read_counter = read_pmtimer_count,
-    .counter_bits = 24,
     .init = init_pmtimer
 };
 
@@ -1006,6 +1003,77 @@ static unsigned long get_cmos_time(void)
         panic("No CMOS RTC found - system must be booted from EFI\n");
 
     return mktime(rtc.year, rtc.mon, rtc.day, rtc.hour, rtc.min, rtc.sec);
+}
+
+/* Helpers for guest accesses to the physical RTC. */
+unsigned int rtc_guest_read(unsigned int port)
+{
+    const struct domain *currd = current->domain;
+    unsigned long flags;
+    unsigned int data = ~0;
+
+    switch ( port )
+    {
+    case RTC_PORT(0):
+        /*
+         * All PV domains (and PVH dom0) are allowed to read the latched value
+         * of the first RTC port, as there's no access to the physical IO
+         * ports.
+         */
+        data = currd->arch.cmos_idx;
+        break;
+
+    case RTC_PORT(1):
+        if ( !ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
+            break;
+        spin_lock_irqsave(&rtc_lock, flags);
+        outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
+        data = inb(RTC_PORT(1));
+        spin_unlock_irqrestore(&rtc_lock, flags);
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+    }
+
+    return data;
+}
+
+void rtc_guest_write(unsigned int port, unsigned int data)
+{
+    struct domain *currd = current->domain;
+    unsigned long flags;
+
+    switch ( port )
+    {
+        typeof(pv_rtc_handler) hook;
+
+    case RTC_PORT(0):
+        /*
+         * All PV domains (and PVH dom0) are allowed to write to the latched
+         * value of the first RTC port, as there's no access to the physical IO
+         * ports.
+         */
+        currd->arch.cmos_idx = data;
+        break;
+
+    case RTC_PORT(1):
+        if ( !ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
+            break;
+
+        hook = ACCESS_ONCE(pv_rtc_handler);
+        if ( hook )
+            hook(currd->arch.cmos_idx & 0x7f, data);
+
+        spin_lock_irqsave(&rtc_lock, flags);
+        outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
+        outb(data, RTC_PORT(1));
+        spin_unlock_irqrestore(&rtc_lock, flags);
+        break;
+
+    default:
+        ASSERT_UNREACHABLE();
+    }
 }
 
 static unsigned long get_wallclock_time(void)

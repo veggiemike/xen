@@ -286,7 +286,7 @@ static int enter_state(u32 state)
     console_end_sync();
     watchdog_enable();
 
-    microcode_update_one(true);
+    microcode_update_one();
 
     if ( !recheck_cpu_features(0) )
         panic("Missing previously available feature(s)\n");
@@ -294,6 +294,9 @@ static int enter_state(u32 state)
     /* Re-enabled default NMI/#MC use of MSR_SPEC_CTRL. */
     ci->spec_ctrl_flags |= (default_spec_ctrl_flags & SCF_ist_wrmsr);
     spec_ctrl_exit_idle(ci);
+
+    if ( boot_cpu_has(X86_FEATURE_SRBDS_CTRL) )
+        wrmsrl(MSR_MCU_OPT_CTRL, default_xen_mcu_opt_ctrl);
 
  done:
     spin_debug_enable();

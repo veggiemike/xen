@@ -43,8 +43,6 @@ void disable_qinval(struct vtd_iommu *iommu);
 int enable_intremap(struct vtd_iommu *iommu, int eim);
 void disable_intremap(struct vtd_iommu *iommu);
 
-void iommu_flush_cache_entry(void *addr, unsigned int size);
-void iommu_flush_cache_page(void *addr, unsigned long npages);
 int iommu_alloc(struct acpi_drhd_unit *drhd);
 void iommu_free(struct acpi_drhd_unit *drhd);
 
@@ -70,7 +68,6 @@ int __must_check qinval_device_iotlb_sync(struct vtd_iommu *iommu,
                                           u16 did, u16 size, u64 addr);
 
 unsigned int get_cache_line_size(void);
-void cacheline_flush(char *);
 void flush_all_cache(void);
 
 uint64_t alloc_pgtable_maddr(unsigned long npages, nodeid_t node);

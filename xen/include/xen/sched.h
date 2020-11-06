@@ -136,7 +136,7 @@ struct evtchn
 } __attribute__((aligned(64)));
 
 int  evtchn_init(struct domain *d, unsigned int max_port);
-void evtchn_destroy(struct domain *d); /* from domain_kill */
+int  evtchn_destroy(struct domain *d); /* from domain_kill */
 void evtchn_destroy_final(struct domain *d); /* from complete_domain_destroy */
 
 struct waitqueue_vcpu;
@@ -382,9 +382,20 @@ struct domain
     /* Event channel information. */
     struct evtchn   *evtchn;                         /* first bucket only */
     struct evtchn  **evtchn_group[NR_EVTCHN_GROUPS]; /* all other buckets */
-    unsigned int     max_evtchns;     /* number supported by ABI */
     unsigned int     max_evtchn_port; /* max permitted port number */
     unsigned int     valid_evtchns;   /* number of allocated event channels */
+    /*
+     * Number of in-use event channels.  Writers should use write_atomic().
+     * Readers need to use read_atomic() only when not holding event_lock.
+     */
+    unsigned int     active_evtchns;
+    /*
+     * Number of event channels used internally by Xen (not subject to
+     * EVTCHNOP_reset).  Read/write access like for active_evtchns.
+     */
+    unsigned int     xen_evtchns;
+    /* Port to resume from in evtchn_reset(), when in a continuation. */
+    unsigned int     next_evtchn;
     spinlock_t       event_lock;
     const struct evtchn_port_ops *evtchn_port_ops;
     struct evtchn_fifo_domain *evtchn_fifo;
@@ -654,7 +665,7 @@ int domain_shutdown(struct domain *d, u8 reason);
 void domain_resume(struct domain *d);
 void domain_pause_for_debugger(void);
 
-int domain_soft_reset(struct domain *d);
+int domain_soft_reset(struct domain *d, bool resuming);
 
 int vcpu_start_shutdown_deferral(struct vcpu *v);
 void vcpu_end_shutdown_deferral(struct vcpu *v);

@@ -236,19 +236,9 @@ static uint32_t guest_io_read(unsigned int port, unsigned int bytes,
         {
             sub_data = pv_pit_handler(port, 0, 0);
         }
-        else if ( port == RTC_PORT(0) )
+        else if ( port == RTC_PORT(0) || port == RTC_PORT(1) )
         {
-            sub_data = currd->arch.cmos_idx;
-        }
-        else if ( (port == RTC_PORT(1)) &&
-                  ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
-        {
-            unsigned long flags;
-
-            spin_lock_irqsave(&rtc_lock, flags);
-            outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
-            sub_data = inb(RTC_PORT(1));
-            spin_unlock_irqrestore(&rtc_lock, flags);
+            sub_data = rtc_guest_read(port);
         }
         else if ( (port == 0xcf8) && (bytes == 4) )
         {
@@ -369,21 +359,9 @@ static void guest_io_write(unsigned int port, unsigned int bytes,
         {
             pv_pit_handler(port, (uint8_t)data, 1);
         }
-        else if ( port == RTC_PORT(0) )
+        else if ( port == RTC_PORT(0) || port == RTC_PORT(1) )
         {
-            currd->arch.cmos_idx = data;
-        }
-        else if ( (port == RTC_PORT(1)) &&
-                  ioports_access_permitted(currd, RTC_PORT(0), RTC_PORT(1)) )
-        {
-            unsigned long flags;
-
-            if ( pv_rtc_handler )
-                pv_rtc_handler(currd->arch.cmos_idx & 0x7f, data);
-            spin_lock_irqsave(&rtc_lock, flags);
-            outb(currd->arch.cmos_idx & 0x7f, RTC_PORT(0));
-            outb(data, RTC_PORT(1));
-            spin_unlock_irqrestore(&rtc_lock, flags);
+            rtc_guest_write(port, data);
         }
         else if ( (port == 0xcf8) && (bytes == 4) )
         {
@@ -779,17 +757,6 @@ static int write_cr(unsigned int reg, unsigned long val,
     }
 
     case 4: /* Write CR4 */
-        /*
-         * If this write will disable FSGSBASE, refresh Xen's idea of the
-         * guest bases now that they can no longer change.
-         */
-        if ( (curr->arch.pv.ctrlreg[4] & X86_CR4_FSGSBASE) &&
-             !(val & X86_CR4_FSGSBASE) )
-        {
-            curr->arch.pv.fs_base = __rdfsbase();
-            curr->arch.pv.gs_base_kernel = __rdgsbase();
-        }
-
         curr->arch.pv.ctrlreg[4] = pv_fixup_guest_cr4(curr, val);
         write_cr4(pv_make_cr4(curr));
         ctxt_switch_levelling(curr);
@@ -838,15 +805,13 @@ static int read_msr(unsigned int reg, uint64_t *val,
     case MSR_FS_BASE:
         if ( is_pv_32bit_domain(currd) )
             break;
-        *val = (read_cr4() & X86_CR4_FSGSBASE) ? __rdfsbase()
-                                               : curr->arch.pv.fs_base;
+        *val = rdfsbase();
         return X86EMUL_OKAY;
 
     case MSR_GS_BASE:
         if ( is_pv_32bit_domain(currd) )
             break;
-        *val = (read_cr4() & X86_CR4_FSGSBASE) ? __rdgsbase()
-                                               : curr->arch.pv.gs_base_kernel;
+        *val = rdgsbase();
         return X86EMUL_OKAY;
 
     case MSR_SHADOW_GS_BASE:
@@ -904,7 +869,8 @@ static int read_msr(unsigned int reg, uint64_t *val,
         return X86EMUL_OKAY;
 
     case MSR_IA32_MISC_ENABLE:
-        rdmsrl(reg, *val);
+        if ( rdmsr_safe(reg, *val) )
+            break;
         *val = guest_misc_enable(*val);
         return X86EMUL_OKAY;
 
@@ -975,14 +941,12 @@ static int write_msr(unsigned int reg, uint64_t val,
         if ( is_pv_32bit_domain(currd) || !is_canonical_address(val) )
             break;
         wrfsbase(val);
-        curr->arch.pv.fs_base = val;
         return X86EMUL_OKAY;
 
     case MSR_GS_BASE:
         if ( is_pv_32bit_domain(currd) || !is_canonical_address(val) )
             break;
         wrgsbase(val);
-        curr->arch.pv.gs_base_kernel = val;
         return X86EMUL_OKAY;
 
     case MSR_SHADOW_GS_BASE:
@@ -1046,7 +1010,8 @@ static int write_msr(unsigned int reg, uint64_t val,
         break;
 
     case MSR_IA32_MISC_ENABLE:
-        rdmsrl(reg, temp);
+        if ( rdmsr_safe(reg, temp) )
+            break;
         if ( val != guest_misc_enable(temp) )
             goto invalid;
         return X86EMUL_OKAY;
