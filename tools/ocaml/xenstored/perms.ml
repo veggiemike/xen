@@ -20,6 +20,7 @@ let info fmt = Logging.info "perms" fmt
 open Stdext
 
 let activate = ref true
+let watch_activate = ref true
 
 type permty = READ | WRITE | RDWR | NONE
 
@@ -57,6 +58,15 @@ let get_other perms = perms.other
 let get_acl perms = perms.acl
 let get_owner perm = perm.owner
 
+(** [remote_domid ~domid perm] removes all ACLs for [domid] from perm.
+* If [domid] was the owner then it is changed to Dom0.
+* This is used for cleaning up after dead domains.
+* *)
+let remove_domid ~domid perm =
+	let acl = List.filter (fun (acl_domid, _) -> acl_domid <> domid) perm.acl in
+	let owner = if perm.owner = domid then 0 else perm.owner in
+	{ perm with acl; owner }
+
 let default0 = create 0 NONE []
 
 let perm_of_string s =
@@ -79,9 +89,9 @@ let of_string s =
 let string_of_perm perm =
 	Printf.sprintf "%c%u" (char_of_permty (snd perm)) (fst perm)
 
-let to_string permvec =
+let to_string ?(sep="\000") permvec =
 	let l = ((permvec.owner, permvec.other) :: permvec.acl) in
-	String.concat "\000" (List.map string_of_perm l)
+	String.concat sep (List.map string_of_perm l)
 
 end
 
@@ -132,8 +142,8 @@ let check_owner (connection:Connection.t) (node:Node.t) =
 	then Connection.is_owner connection (Node.get_owner node)
 	else true
 
-(* check if the current connection has the requested perm on the current node *)
-let check (connection:Connection.t) request (node:Node.t) =
+(* check if the current connection lacks the requested perm on the current node *)
+let lacks (connection:Connection.t) request (node:Node.t) =
 	let check_acl domainid =
 		let perm =
 			if List.mem_assoc domainid (Node.get_acl node)
@@ -154,11 +164,23 @@ let check (connection:Connection.t) request (node:Node.t) =
 			info "Permission denied: Domain %d has write only access" domainid;
 			false
 	in
-	if !activate
+	!activate
 	&& not (Connection.is_dom0 connection)
 	&& not (check_owner connection node)
 	&& not (List.exists check_acl (Connection.get_owners connection))
+
+(* check if the current connection has the requested perm on the current node.
+*  Raises an exception if it doesn't. *)
+let check connection request node =
+	if lacks connection request node
 	then raise Define.Permission_denied
+
+(* check if the current connection has the requested perm on the current node *)
+let has connection request node = not (lacks connection request node)
+
+let can_fire_watch connection perms =
+	not !watch_activate
+	|| List.exists (has connection READ) perms
 
 let equiv perm1 perm2 =
 	(Node.to_string perm1) = (Node.to_string perm2)

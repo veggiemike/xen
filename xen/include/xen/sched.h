@@ -85,7 +85,7 @@ extern domid_t hardware_domid;
 
 struct evtchn
 {
-    spinlock_t lock;
+    rwlock_t lock;
 #define ECS_FREE         0 /* Channel is available for use.                  */
 #define ECS_RESERVED     1 /* Channel is reserved.                           */
 #define ECS_UNBOUND      2 /* Channel is waiting to bind to a remote domain. */
@@ -114,8 +114,10 @@ struct evtchn
         u16 virq;      /* state == ECS_VIRQ */
     } u;
     u8 priority;
-    u8 last_priority;
-    u16 last_vcpu_id;
+#ifndef NDEBUG
+    u8 old_state;      /* State when taking lock in write mode. */
+#endif
+    u32 fifo_lastq;    /* Data for fifo events identifying last queue. */
 #ifdef CONFIG_XSM
     union {
 #ifdef XSM_NEED_GENERIC_EVTCHN_SSID
@@ -138,7 +140,7 @@ struct evtchn
 } __attribute__((aligned(64)));
 
 int  evtchn_init(struct domain *d, unsigned int max_port);
-void evtchn_destroy(struct domain *d); /* from domain_kill */
+int  evtchn_destroy(struct domain *d); /* from domain_kill */
 void evtchn_destroy_final(struct domain *d); /* from complete_domain_destroy */
 
 struct waitqueue_vcpu;
@@ -359,9 +361,20 @@ struct domain
     /* Event channel information. */
     struct evtchn   *evtchn;                         /* first bucket only */
     struct evtchn  **evtchn_group[NR_EVTCHN_GROUPS]; /* all other buckets */
-    unsigned int     max_evtchns;     /* number supported by ABI */
     unsigned int     max_evtchn_port; /* max permitted port number */
     unsigned int     valid_evtchns;   /* number of allocated event channels */
+    /*
+     * Number of in-use event channels.  Writers should use write_atomic().
+     * Readers need to use read_atomic() only when not holding event_lock.
+     */
+    unsigned int     active_evtchns;
+    /*
+     * Number of event channels used internally by Xen (not subject to
+     * EVTCHNOP_reset).  Read/write access like for active_evtchns.
+     */
+    unsigned int     xen_evtchns;
+    /* Port to resume from in evtchn_reset(), when in a continuation. */
+    unsigned int     next_evtchn;
     spinlock_t       event_lock;
     const struct evtchn_port_ops *evtchn_port_ops;
     struct evtchn_fifo_domain *evtchn_fifo;
@@ -654,7 +667,7 @@ int domain_kill(struct domain *d);
 int domain_shutdown(struct domain *d, u8 reason);
 void domain_resume(struct domain *d);
 
-int domain_soft_reset(struct domain *d);
+int domain_soft_reset(struct domain *d, bool resuming);
 
 int vcpu_start_shutdown_deferral(struct vcpu *v);
 void vcpu_end_shutdown_deferral(struct vcpu *v);
@@ -1059,6 +1072,22 @@ extern bool sched_disable_smt_switching;
 extern enum cpufreq_controller {
     FREQCTL_none, FREQCTL_dom0_kernel, FREQCTL_xen
 } cpufreq_controller;
+
+static always_inline bool is_cpufreq_controller(const struct domain *d)
+{
+    /*
+     * A PV dom0 can be nominated as the cpufreq controller, instead of using
+     * Xen's cpufreq driver, at which point dom0 gets direct access to certain
+     * MSRs.
+     *
+     * This interface only works when dom0 is identity pinned and has the same
+     * number of vCPUs as pCPUs on the system.
+     *
+     * It would be far better to paravirtualise the interface.
+     */
+    return (is_pv_domain(d) && is_hardware_domain(d) &&
+            cpufreq_controller == FREQCTL_dom0_kernel);
+}
 
 int cpupool_move_domain(struct domain *d, struct cpupool *c);
 int cpupool_do_sysctl(struct xen_sysctl_cpupool_op *op);

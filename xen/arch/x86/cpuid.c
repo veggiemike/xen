@@ -719,6 +719,14 @@ int init_domain_cpuid_policy(struct domain *d)
     if ( d->disable_migrate )
         p->extd.itsc = cpu_has_itsc;
 
+    /*
+     * Expose the "hardware speculation behaviour" bits of ARCH_CAPS to dom0,
+     * so dom0 can turn off workarounds as appropriate.  Temporary, until the
+     * domain policy logic gains a better understanding of MSRs.
+     */
+    if ( is_hardware_domain(d) && boot_cpu_has(X86_FEATURE_ARCH_CAPS) )
+        p->feat.arch_caps = true;
+
     d->arch.cpuid = p;
 
     recalculate_cpuid_policy(d);
@@ -1057,7 +1065,7 @@ void guest_cpuid(const struct vcpu *v, uint32_t leaf,
         {
             /* Fast-forward MSR_APIC_BASE.EN. */
             if ( vlapic_hw_disabled(vcpu_vlapic(v)) )
-                res->d &= ~cpufeat_bit(X86_FEATURE_APIC);
+                res->d &= ~cpufeat_mask(X86_FEATURE_APIC);
 
             /*
              * PSE36 is not supported in shadow mode.  This bit should be

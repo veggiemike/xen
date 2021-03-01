@@ -47,7 +47,12 @@
  * transaction.
  * Each time the global generation count is copied to either a node or a
  * transaction it is incremented. This ensures all nodes and/or transactions
- * are having a unique generation count.
+ * are having a unique generation count. The increment is done _before_ the
+ * copy as that is needed for checking whether a domain was created before
+ * or after a node has been written (the domain's generation is set with the
+ * actual generation count without incrementing it, in order to support
+ * writing a node for a domain before the domain has been officially
+ * introduced).
  *
  * Transaction conflicts are detected by checking the generation count of all
  * nodes read in the transaction to match with the generation count in the
@@ -114,6 +119,9 @@ struct accessed_node
 	/* Generation count (or NO_GENERATION) for conflict checking. */
 	uint64_t generation;
 
+	/* Original node permissions. */
+	struct node_perms perms;
+
 	/* Generation count checking required? */
 	bool check_gen;
 
@@ -158,7 +166,7 @@ struct transaction
 };
 
 extern int quota_max_transaction;
-static uint64_t generation;
+uint64_t generation;
 
 static void set_tdb_key(const char *name, TDB_DATA *key)
 {
@@ -234,7 +242,7 @@ int access_node(struct connection *conn, struct node *node,
 	bool introduce = false;
 
 	if (type != NODE_ACCESS_READ) {
-		node->generation = generation++;
+		node->generation = ++generation;
 		if (conn && !conn->transaction)
 			wrl_apply_debit_direct(conn);
 	}
@@ -260,6 +268,15 @@ int access_node(struct connection *conn, struct node *node,
 		i->node = talloc_strdup(i, node->name);
 		if (!i->node)
 			goto nomem;
+		if (node->generation != NO_GENERATION && node->perms.num) {
+			i->perms.p = talloc_array(i, struct xs_permissions,
+						  node->perms.num);
+			if (!i->perms.p)
+				goto nomem;
+			i->perms.num = node->perms.num;
+			memcpy(i->perms.p, node->perms.p,
+			       i->perms.num * sizeof(*i->perms.p));
+		}
 
 		introduce = true;
 		i->ta_node = false;
@@ -276,7 +293,7 @@ int access_node(struct connection *conn, struct node *node,
 			i->check_gen = true;
 			if (node->generation != NO_GENERATION) {
 				set_tdb_key(trans_name, &local_key);
-				ret = write_node_raw(conn, &local_key, node);
+				ret = write_node_raw(conn, &local_key, node, true);
 				if (ret)
 					goto err;
 				i->ta_node = true;
@@ -362,15 +379,20 @@ static int finalize_transaction(struct connection *conn,
 				if (!data.dptr)
 					goto err;
 				hdr = (void *)data.dptr;
-				hdr->generation = generation++;
+				hdr->generation = ++generation;
 				ret = tdb_store(tdb_ctx, key, data,
 						TDB_REPLACE);
 				talloc_free(data.dptr);
 				if (ret)
 					goto err;
-			} else if (tdb_delete(tdb_ctx, key))
+				fire_watches(conn, trans, i->node, NULL, false,
+					     i->perms.p ? &i->perms : NULL);
+			} else {
+				fire_watches(conn, trans, i->node, NULL, false,
+					     i->perms.p ? &i->perms : NULL);
+				if (tdb_delete(tdb_ctx, key))
 					goto err;
-			fire_watches(conn, trans, i->node, false);
+			}
 		}
 
 		if (i->ta_node && tdb_delete(tdb_ctx, ta_key))
@@ -445,7 +467,7 @@ int do_transaction_start(struct connection *conn, struct buffered_data *in)
 	INIT_LIST_HEAD(&trans->accessed);
 	INIT_LIST_HEAD(&trans->changed_domains);
 	trans->fail = false;
-	trans->generation = generation++;
+	trans->generation = ++generation;
 
 	/* Pick an unused transaction identifier. */
 	do {

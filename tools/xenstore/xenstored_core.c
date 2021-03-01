@@ -104,6 +104,7 @@ int quota_nb_entry_per_domain = 1000;
 int quota_nb_watch_per_domain = 128;
 int quota_max_entry_size = 2048; /* 2K */
 int quota_max_transaction = 10;
+int quota_nb_perms_per_node = 5;
 
 void trace(const char *fmt, ...)
 {
@@ -360,8 +361,8 @@ static void initialize_fds(int *p_sock_pollfd_idx, int *p_ro_sock_pollfd_idx,
  * If it fails, returns NULL and sets errno.
  * Temporary memory allocations will be done with ctx.
  */
-static struct node *read_node(struct connection *conn, const void *ctx,
-			      const char *name)
+struct node *read_node(struct connection *conn, const void *ctx,
+		       const char *name)
 {
 	TDB_DATA key, data;
 	struct xs_tdb_record_hdr *hdr;
@@ -403,14 +404,19 @@ static struct node *read_node(struct connection *conn, const void *ctx,
 	/* Datalen, childlen, number of permissions */
 	hdr = (void *)data.dptr;
 	node->generation = hdr->generation;
-	node->num_perms = hdr->num_perms;
+	node->perms.num = hdr->num_perms;
 	node->datalen = hdr->datalen;
 	node->childlen = hdr->childlen;
 
 	/* Permissions are struct xs_permissions. */
-	node->perms = hdr->perms;
+	node->perms.p = hdr->perms;
+	if (domain_adjust_node_perms(node)) {
+		talloc_free(node);
+		return NULL;
+	}
+
 	/* Data is binary blob (usually ascii, no nul). */
-	node->data = node->perms + node->num_perms;
+	node->data = node->perms.p + hdr->num_perms;
 	/* Children is strings, nul separated. */
 	node->children = node->data + node->datalen;
 
@@ -419,17 +425,21 @@ static struct node *read_node(struct connection *conn, const void *ctx,
 	return node;
 }
 
-int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node)
+int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node,
+		   bool no_quota_check)
 {
 	TDB_DATA data;
 	void *p;
 	struct xs_tdb_record_hdr *hdr;
 
+	if (domain_adjust_node_perms(node))
+		return errno;
+
 	data.dsize = sizeof(*hdr)
-		+ node->num_perms*sizeof(node->perms[0])
+		+ node->perms.num * sizeof(node->perms.p[0])
 		+ node->datalen + node->childlen;
 
-	if (domain_is_unprivileged(conn) &&
+	if (!no_quota_check && domain_is_unprivileged(conn) &&
 	    data.dsize >= quota_max_entry_size) {
 		errno = ENOSPC;
 		return errno;
@@ -438,12 +448,13 @@ int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node)
 	data.dptr = talloc_size(node, data.dsize);
 	hdr = (void *)data.dptr;
 	hdr->generation = node->generation;
-	hdr->num_perms = node->num_perms;
+	hdr->num_perms = node->perms.num;
 	hdr->datalen = node->datalen;
 	hdr->childlen = node->childlen;
 
-	memcpy(hdr->perms, node->perms, node->num_perms*sizeof(node->perms[0]));
-	p = hdr->perms + node->num_perms;
+	memcpy(hdr->perms, node->perms.p,
+	       node->perms.num * sizeof(*node->perms.p));
+	p = hdr->perms + node->perms.num;
 	memcpy(p, node->data, node->datalen);
 	p += node->datalen;
 	memcpy(p, node->children, node->childlen);
@@ -457,19 +468,19 @@ int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node)
 	return 0;
 }
 
-static int write_node(struct connection *conn, struct node *node)
+static int write_node(struct connection *conn, struct node *node,
+		      bool no_quota_check)
 {
 	TDB_DATA key;
 
 	if (access_node(conn, node, NODE_ACCESS_WRITE, &key))
 		return errno;
 
-	return write_node_raw(conn, &key, node);
+	return write_node_raw(conn, &key, node, no_quota_check);
 }
 
-static enum xs_perm_type perm_for_conn(struct connection *conn,
-				       struct xs_permissions *perms,
-				       unsigned int num)
+enum xs_perm_type perm_for_conn(struct connection *conn,
+				const struct node_perms *perms)
 {
 	unsigned int i;
 	enum xs_perm_type mask = XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER;
@@ -478,23 +489,24 @@ static enum xs_perm_type perm_for_conn(struct connection *conn,
 		mask &= ~XS_PERM_WRITE;
 
 	/* Owners and tools get it all... */
-	if (!domain_is_unprivileged(conn) || perms[0].id == conn->id
-                || (conn->target && perms[0].id == conn->target->id))
+	if (!domain_is_unprivileged(conn) || perms->p[0].id == conn->id
+                || (conn->target && perms->p[0].id == conn->target->id))
 		return (XS_PERM_READ|XS_PERM_WRITE|XS_PERM_OWNER) & mask;
 
-	for (i = 1; i < num; i++)
-		if (perms[i].id == conn->id
-                        || (conn->target && perms[i].id == conn->target->id))
-			return perms[i].perms & mask;
+	for (i = 1; i < perms->num; i++)
+		if (!(perms->p[i].perms & XS_PERM_IGNORE) &&
+		    (perms->p[i].id == conn->id ||
+		     (conn->target && perms->p[i].id == conn->target->id)))
+			return perms->p[i].perms & mask;
 
-	return perms[0].perms & mask;
+	return perms->p[0].perms & mask;
 }
 
 /*
  * Get name of node parent.
  * Temporary memory allocations are done with ctx.
  */
-static char *get_parent(const void *ctx, const char *node)
+char *get_parent(const void *ctx, const char *node)
 {
 	char *parent;
 	char *slash = strrchr(node + 1, '/');
@@ -534,7 +546,7 @@ static int ask_parents(struct connection *conn, const void *ctx,
 		return 0;
 	}
 
-	*perm = perm_for_conn(conn, node->perms, node->num_perms);
+	*perm = perm_for_conn(conn, &node->perms);
 	return 0;
 }
 
@@ -566,10 +578,10 @@ static int errno_from_parents(struct connection *conn, const void *ctx,
  * If it fails, returns NULL and sets errno.
  * Temporary memory allocations are done with ctx.
  */
-struct node *get_node(struct connection *conn,
-		      const void *ctx,
-		      const char *name,
-		      enum xs_perm_type perm)
+static struct node *get_node(struct connection *conn,
+			     const void *ctx,
+			     const char *name,
+			     enum xs_perm_type perm)
 {
 	struct node *node;
 
@@ -580,8 +592,7 @@ struct node *get_node(struct connection *conn,
 	node = read_node(conn, ctx, name);
 	/* If we don't have permission, we don't have node. */
 	if (node) {
-		if ((perm_for_conn(conn, node->perms, node->num_perms) & perm)
-		    != perm) {
+		if ((perm_for_conn(conn, &node->perms) & perm) != perm) {
 			errno = EACCES;
 			node = NULL;
 		}
@@ -671,6 +682,9 @@ void send_reply(struct connection *conn, enum xsd_sockmsg_type type,
 	/* Replies reuse the request buffer, events need a new one. */
 	if (type != XS_WATCH_EVENT) {
 		bdata = conn->in;
+		/* Drop asynchronous responses, e.g. errors for watch events. */
+		if (!bdata)
+			return;
 		bdata->inhdr = true;
 		bdata->used = 0;
 		conn->in = NULL;
@@ -757,16 +771,15 @@ const char *onearg(struct buffered_data *in)
 	return in->buffer;
 }
 
-static char *perms_to_strings(const void *ctx,
-			      struct xs_permissions *perms, unsigned int num,
+static char *perms_to_strings(const void *ctx, const struct node_perms *perms,
 			      unsigned int *len)
 {
 	unsigned int i;
 	char *strings = NULL;
 	char buffer[MAX_STRLEN(unsigned int) + 1];
 
-	for (*len = 0, i = 0; i < num; i++) {
-		if (!xs_perm_to_string(&perms[i], buffer, sizeof(buffer)))
+	for (*len = 0, i = 0; i < perms->num; i++) {
+		if (!xs_perm_to_string(&perms->p[i], buffer, sizeof(buffer)))
 			return NULL;
 
 		strings = talloc_realloc(ctx, strings, char,
@@ -925,11 +938,6 @@ static struct node *construct_node(struct connection *conn, const void *ctx,
 	if (!parent)
 		return NULL;
 
-	if (domain_entry(conn) >= quota_nb_entry_per_domain) {
-		errno = ENOSPC;
-		return NULL;
-	}
-
 	/* Add child to parent. */
 	base = basename(name);
 	baselen = strlen(base) + 1;
@@ -950,19 +958,18 @@ static struct node *construct_node(struct connection *conn, const void *ctx,
 		goto nomem;
 
 	/* Inherit permissions, except unprivileged domains own what they create */
-	node->num_perms = parent->num_perms;
-	node->perms = talloc_memdup(node, parent->perms,
-				    node->num_perms * sizeof(node->perms[0]));
-	if (!node->perms)
+	node->perms.num = parent->perms.num;
+	node->perms.p = talloc_memdup(node, parent->perms.p,
+				      node->perms.num * sizeof(*node->perms.p));
+	if (!node->perms.p)
 		goto nomem;
 	if (domain_is_unprivileged(conn))
-		node->perms[0].id = conn->id;
+		node->perms.p[0].id = conn->id;
 
 	/* No children, no data */
 	node->children = node->data = NULL;
 	node->childlen = node->datalen = 0;
 	node->parent = parent;
-	domain_entry_inc(conn, node);
 	return node;
 
 nomem:
@@ -982,6 +989,9 @@ static int destroy_node(void *_node)
 	key.dsize = strlen(node->name);
 
 	tdb_delete(tdb_ctx, key);
+
+	domain_entry_dec(talloc_parent(node), node);
+
 	return 0;
 }
 
@@ -998,18 +1008,34 @@ static struct node *create_node(struct connection *conn, const void *ctx,
 	node->data = data;
 	node->datalen = datalen;
 
-	/* We write out the nodes down, setting destructor in case
-	 * something goes wrong. */
+	/*
+	 * We write out the nodes bottom up.
+	 * All new created nodes will have i->parent set, while the final
+	 * node will be already existing and won't have i->parent set.
+	 * New nodes are subject to quota handling.
+	 * Initially set a destructor for all new nodes removing them from
+	 * TDB again and undoing quota accounting for the case of an error
+	 * during the write loop.
+	 */
 	for (i = node; i; i = i->parent) {
-		if (write_node(conn, i)) {
-			domain_entry_dec(conn, i);
+		/* i->parent is set for each new node, so check quota. */
+		if (i->parent &&
+		    domain_entry(conn) >= quota_nb_entry_per_domain) {
+			errno = ENOSPC;
 			return NULL;
 		}
-		talloc_set_destructor(i, destroy_node);
+		if (write_node(conn, i, false))
+			return NULL;
+
+		/* Account for new node, set destructor for error case. */
+		if (i->parent) {
+			domain_entry_inc(conn, i);
+			talloc_set_destructor(i, destroy_node);
+		}
 	}
 
 	/* OK, now remove destructors so they stay around */
-	for (i = node; i; i = i->parent)
+	for (i = node; i->parent; i = i->parent)
 		talloc_set_destructor(i, NULL);
 	return node;
 }
@@ -1041,11 +1067,11 @@ static int do_write(struct connection *conn, struct buffered_data *in)
 	} else {
 		node->data = in->buffer + offset;
 		node->datalen = datalen;
-		if (write_node(conn, node))
+		if (write_node(conn, node, false))
 			return errno;
 	}
 
-	fire_watches(conn, in, name, false);
+	fire_watches(conn, in, name, node, false, NULL);
 	send_ack(conn, XS_WRITE);
 
 	return 0;
@@ -1067,42 +1093,12 @@ static int do_mkdir(struct connection *conn, struct buffered_data *in)
 		node = create_node(conn, in, name, NULL, 0);
 		if (!node)
 			return errno;
-		fire_watches(conn, in, name, false);
+		fire_watches(conn, in, name, node, false, NULL);
 	}
 	send_ack(conn, XS_MKDIR);
 
 	return 0;
 }
-
-static void delete_node(struct connection *conn, struct node *node)
-{
-	unsigned int i;
-	char *name;
-
-	/* Delete self, then delete children.  If we crash, then the worst
-	   that can happen is the children will continue to take up space, but
-	   will otherwise be unreachable. */
-	delete_node_single(conn, node);
-
-	/* Delete children, too. */
-	for (i = 0; i < node->childlen; i += strlen(node->children+i) + 1) {
-		struct node *child;
-
-		name = talloc_asprintf(node, "%s/%s", node->name,
-				       node->children + i);
-		child = name ? read_node(conn, node, name) : NULL;
-		if (child) {
-			delete_node(conn, child);
-		}
-		else {
-			trace("delete_node: Error deleting child '%s/%s'!\n",
-			      node->name, node->children + i);
-			/* Skip it, we've already deleted the parent. */
-		}
-		talloc_free(name);
-	}
-}
-
 
 /* Delete memory using memmove. */
 static void memdel(void *mem, unsigned off, unsigned len, unsigned total)
@@ -1110,38 +1106,71 @@ static void memdel(void *mem, unsigned off, unsigned len, unsigned total)
 	memmove(mem + off, mem + off + len, total - off - len);
 }
 
-
-static int remove_child_entry(struct connection *conn, struct node *node,
-			      size_t offset)
+static void remove_child_entry(struct connection *conn, struct node *node,
+			       size_t offset)
 {
 	size_t childlen = strlen(node->children + offset);
+
 	memdel(node->children, offset, childlen + 1, node->childlen);
 	node->childlen -= childlen + 1;
-	return write_node(conn, node);
+	if (write_node(conn, node, true))
+		corrupt(conn, "Can't update parent node '%s'", node->name);
 }
 
-
-static int delete_child(struct connection *conn,
-			struct node *node, const char *childname)
+static void delete_child(struct connection *conn,
+			 struct node *node, const char *childname)
 {
 	unsigned int i;
 
 	for (i = 0; i < node->childlen; i += strlen(node->children+i) + 1) {
 		if (streq(node->children+i, childname)) {
-			return remove_child_entry(conn, node, i);
+			remove_child_entry(conn, node, i);
+			return;
 		}
 	}
 	corrupt(conn, "Can't find child '%s' in %s", childname, node->name);
-	return ENOENT;
 }
 
+static int delete_node(struct connection *conn, const void *ctx,
+		       struct node *parent, struct node *node)
+{
+	char *name;
+
+	/* Delete children. */
+	while (node->childlen) {
+		struct node *child;
+
+		name = talloc_asprintf(node, "%s/%s", node->name,
+				       node->children);
+		child = name ? read_node(conn, node, name) : NULL;
+		if (child) {
+			if (delete_node(conn, ctx, node, child))
+				return errno;
+		} else {
+			trace("delete_node: Error deleting child '%s/%s'!\n",
+			      node->name, node->children);
+			/* Quit deleting. */
+			errno = ENOMEM;
+			return errno;
+		}
+		talloc_free(name);
+	}
+
+	fire_watches(conn, ctx, node->name, node, true, NULL);
+	delete_node_single(conn, node);
+	delete_child(conn, parent, basename(node->name));
+	talloc_free(node);
+
+	return 0;
+}
 
 static int _rm(struct connection *conn, const void *ctx, struct node *node,
 	       const char *name)
 {
-	/* Delete from parent first, then if we crash, the worst that can
-	   happen is the child will continue to take up space, but will
-	   otherwise be unreachable. */
+	/*
+	 * Deleting node by node, so the result is always consistent even in
+	 * case of a failure.
+	 */
 	struct node *parent;
 	char *parentname = get_parent(ctx, name);
 
@@ -1151,12 +1180,15 @@ static int _rm(struct connection *conn, const void *ctx, struct node *node,
 	parent = read_node(conn, ctx, parentname);
 	if (!parent)
 		return (errno == ENOMEM) ? ENOMEM : EINVAL;
+	node->parent = parent;
 
-	if (delete_child(conn, parent, basename(name)))
-		return EINVAL;
-
-	delete_node(conn, node);
-	return 0;
+	/*
+	 * Fire the watches now, when we can still see the node permissions.
+	 * This fine as we are single threaded and the next possible read will
+	 * be handled only after the node has been really removed.
+	 */
+	fire_watches(conn, ctx, name, node, false, NULL);
+	return delete_node(conn, ctx, parent, node);
 }
 
 
@@ -1194,7 +1226,6 @@ static int do_rm(struct connection *conn, struct buffered_data *in)
 	if (ret)
 		return ret;
 
-	fire_watches(conn, in, name, true);
 	send_ack(conn, XS_RM);
 
 	return 0;
@@ -1211,7 +1242,7 @@ static int do_get_perms(struct connection *conn, struct buffered_data *in)
 	if (!node)
 		return errno;
 
-	strings = perms_to_strings(node, node->perms, node->num_perms, &len);
+	strings = perms_to_strings(node, &node->perms, &len);
 	if (!strings)
 		return errno;
 
@@ -1222,44 +1253,55 @@ static int do_get_perms(struct connection *conn, struct buffered_data *in)
 
 static int do_set_perms(struct connection *conn, struct buffered_data *in)
 {
-	unsigned int num;
-	struct xs_permissions *perms;
+	struct node_perms perms, old_perms;
 	char *name, *permstr;
 	struct node *node;
 
-	num = xs_count_strings(in->buffer, in->used);
-	if (num < 2)
+	perms.num = xs_count_strings(in->buffer, in->used);
+	if (perms.num < 2)
 		return EINVAL;
 
+	perms.num--;
+	if (domain_is_unprivileged(conn) &&
+	    perms.num > quota_nb_perms_per_node)
+		return ENOSPC;
+
+	permstr = in->buffer + strlen(in->buffer) + 1;
+
+	perms.p = talloc_array(in, struct xs_permissions, perms.num);
+	if (!perms.p)
+		return ENOMEM;
+	if (!xs_strings_to_perms(perms.p, perms.num, permstr))
+		return errno;
+
 	/* First arg is node name. */
+	if (strstarts(in->buffer, "@")) {
+		if (set_perms_special(conn, in->buffer, &perms))
+			return errno;
+		send_ack(conn, XS_SET_PERMS);
+		return 0;
+	}
+
 	/* We must own node to do this (tools can do this too). */
 	node = get_node_canonicalized(conn, in, in->buffer, &name,
 				      XS_PERM_WRITE | XS_PERM_OWNER);
 	if (!node)
 		return errno;
 
-	permstr = in->buffer + strlen(in->buffer) + 1;
-	num--;
-
-	perms = talloc_array(node, struct xs_permissions, num);
-	if (!perms)
-		return ENOMEM;
-	if (!xs_strings_to_perms(perms, num, permstr))
-		return errno;
-
 	/* Unprivileged domains may not change the owner. */
-	if (domain_is_unprivileged(conn) && perms[0].id != node->perms[0].id)
+	if (domain_is_unprivileged(conn) &&
+	    perms.p[0].id != node->perms.p[0].id)
 		return EPERM;
 
+	old_perms = node->perms;
 	domain_entry_dec(conn, node);
 	node->perms = perms;
-	node->num_perms = num;
 	domain_entry_inc(conn, node);
 
-	if (write_node(conn, node))
+	if (write_node(conn, node, false))
 		return errno;
 
-	fire_watches(conn, in, name, false);
+	fire_watches(conn, in, name, node, false, &old_perms);
 	send_ack(conn, XS_SET_PERMS);
 
 	return 0;
@@ -1268,17 +1310,25 @@ static int do_set_perms(struct connection *conn, struct buffered_data *in)
 static struct {
 	const char *str;
 	int (*func)(struct connection *conn, struct buffered_data *in);
+	unsigned int flags;
+#define XS_FLAG_NOTID		(1U << 0)	/* Ignore transaction id. */
+#define XS_FLAG_PRIV		(1U << 1)	/* Privileged domain only. */
 } const wire_funcs[XS_TYPE_COUNT] = {
-	[XS_CONTROL]           = { "CONTROL",           do_control },
+	[XS_CONTROL]           =
+	    { "CONTROL",       do_control,      XS_FLAG_PRIV },
 	[XS_DIRECTORY]         = { "DIRECTORY",         send_directory },
 	[XS_READ]              = { "READ",              do_read },
 	[XS_GET_PERMS]         = { "GET_PERMS",         do_get_perms },
-	[XS_WATCH]             = { "WATCH",             do_watch },
-	[XS_UNWATCH]           = { "UNWATCH",           do_unwatch },
+	[XS_WATCH]             =
+	    { "WATCH",         do_watch,        XS_FLAG_NOTID },
+	[XS_UNWATCH]           =
+	    { "UNWATCH",       do_unwatch,      XS_FLAG_NOTID },
 	[XS_TRANSACTION_START] = { "TRANSACTION_START", do_transaction_start },
 	[XS_TRANSACTION_END]   = { "TRANSACTION_END",   do_transaction_end },
-	[XS_INTRODUCE]         = { "INTRODUCE",         do_introduce },
-	[XS_RELEASE]           = { "RELEASE",           do_release },
+	[XS_INTRODUCE]         =
+	    { "INTRODUCE",     do_introduce,    XS_FLAG_PRIV },
+	[XS_RELEASE]           =
+	    { "RELEASE",       do_release,      XS_FLAG_PRIV },
 	[XS_GET_DOMAIN_PATH]   = { "GET_DOMAIN_PATH",   do_get_domain_path },
 	[XS_WRITE]             = { "WRITE",             do_write },
 	[XS_MKDIR]             = { "MKDIR",             do_mkdir },
@@ -1287,16 +1337,44 @@ static struct {
 	[XS_WATCH_EVENT]       = { "WATCH_EVENT",       NULL },
 	[XS_ERROR]             = { "ERROR",             NULL },
 	[XS_IS_DOMAIN_INTRODUCED] =
-			{ "IS_DOMAIN_INTRODUCED", do_is_domain_introduced },
-	[XS_RESUME]            = { "RESUME",            do_resume },
-	[XS_SET_TARGET]        = { "SET_TARGET",        do_set_target },
+	    { "IS_DOMAIN_INTRODUCED", do_is_domain_introduced, XS_FLAG_PRIV },
+	[XS_RESUME]            =
+	    { "RESUME",        do_resume,       XS_FLAG_PRIV },
+	[XS_SET_TARGET]        =
+	    { "SET_TARGET",    do_set_target,   XS_FLAG_PRIV },
 	[XS_RESET_WATCHES]     = { "RESET_WATCHES",     do_reset_watches },
 	[XS_DIRECTORY_PART]    = { "DIRECTORY_PART",    send_directory_part },
 };
 
+/*
+ * Keep the connection alive but stop processing any new request or sending
+ * reponse. This is to allow sending @releaseDomain watch event at the correct
+ * moment and/or to allow the connection to restart (not yet implemented).
+ *
+ * All watches, transactions, buffers will be freed.
+ */
+static void ignore_connection(struct connection *conn)
+{
+	struct buffered_data *out, *tmp;
+
+	trace("CONN %p ignored\n", conn);
+
+	conn->is_ignored = true;
+	conn_delete_all_watches(conn);
+	conn_delete_all_transactions(conn);
+
+	list_for_each_entry_safe(out, tmp, &conn->out_list, list) {
+		list_del(&out->list);
+		talloc_free(out);
+	}
+
+	talloc_free(conn->in);
+	conn->in = NULL;
+}
+
 static const char *sockmsg_string(enum xsd_sockmsg_type type)
 {
-	if ((unsigned)type < XS_TYPE_COUNT && wire_funcs[type].str)
+	if ((unsigned int)type < ARRAY_SIZE(wire_funcs) && wire_funcs[type].str)
 		return wire_funcs[type].str;
 
 	return "**UNKNOWN**";
@@ -1311,7 +1389,20 @@ static void process_message(struct connection *conn, struct buffered_data *in)
 	enum xsd_sockmsg_type type = in->hdr.msg.type;
 	int ret;
 
-	trans = transaction_lookup(conn, in->hdr.msg.tx_id);
+	if ((unsigned int)type >= XS_TYPE_COUNT || !wire_funcs[type].func) {
+		eprintf("Client unknown operation %i", type);
+		send_error(conn, ENOSYS);
+		return;
+	}
+
+	if ((wire_funcs[type].flags & XS_FLAG_PRIV) &&
+	    domain_is_unprivileged(conn)) {
+		send_error(conn, EACCES);
+		return;
+	}
+
+	trans = (wire_funcs[type].flags & XS_FLAG_NOTID)
+		? NULL : transaction_lookup(conn, in->hdr.msg.tx_id);
 	if (IS_ERR(trans)) {
 		send_error(conn, -PTR_ERR(trans));
 		return;
@@ -1320,12 +1411,7 @@ static void process_message(struct connection *conn, struct buffered_data *in)
 	assert(conn->transaction == NULL);
 	conn->transaction = trans;
 
-	if ((unsigned)type < XS_TYPE_COUNT && wire_funcs[type].func)
-		ret = wire_funcs[type].func(conn, in);
-	else {
-		eprintf("Client unknown operation %i", type);
-		ret = ENOSYS;
-	}
+	ret = wire_funcs[type].func(conn, in);
 	if (ret)
 		send_error(conn, ret);
 
@@ -1344,8 +1430,10 @@ static void consider_message(struct connection *conn)
 	assert(conn->in == NULL);
 }
 
-/* Errors in reading or allocating here mean we get out of sync, so we
- * drop the whole client connection. */
+/*
+ * Errors in reading or allocating here means we get out of sync, so we mark
+ * the connection as ignored.
+ */
 static void handle_input(struct connection *conn)
 {
 	int bytes;
@@ -1402,14 +1490,14 @@ static void handle_input(struct connection *conn)
 	return;
 
 bad_client:
-	/* Kill it. */
-	talloc_free(conn);
+	ignore_connection(conn);
 }
 
 static void handle_output(struct connection *conn)
 {
+	/* Ignore the connection if an error occured */
 	if (!write_messages(conn))
-		talloc_free(conn);
+		ignore_connection(conn);
 }
 
 struct connection *new_connection(connwritefn_t *write, connreadfn_t *read)
@@ -1425,6 +1513,7 @@ struct connection *new_connection(connwritefn_t *write, connreadfn_t *read)
 	new->write = write;
 	new->read = read;
 	new->can_write = true;
+	new->is_ignored = false;
 	new->transaction_started = 0;
 	INIT_LIST_HEAD(&new->out_list);
 	INIT_LIST_HEAD(&new->watches);
@@ -1510,13 +1599,13 @@ static void manual_node(const char *name, const char *child)
 		barf_perror("Could not allocate initial node %s", name);
 
 	node->name = name;
-	node->perms = &perms;
-	node->num_perms = 1;
+	node->perms.p = &perms;
+	node->perms.num = 1;
 	node->children = (char *)child;
 	if (child)
 		node->childlen = strlen(child) + 1;
 
-	if (write_node(NULL, node))
+	if (write_node(NULL, node, false))
 		barf_perror("Could not create initial node %s", name);
 	talloc_free(node);
 }
@@ -1861,6 +1950,7 @@ static void usage(void)
 "  -S, --entry-size <size> limit the size of entry per domain, and\n"
 "  -W, --watch-nb <nb>     limit the number of watches per domain,\n"
 "  -t, --transaction <nb>  limit the number of transaction allowed per domain,\n"
+"  -A, --perm-nb <nb>      limit the number of permissions per node,\n"
 "  -R, --no-recovery       to request that no recovery should be attempted when\n"
 "                          the store is corrupted (debug only),\n"
 "  -I, --internal-db       store database in memory, not on disk\n"
@@ -1881,6 +1971,7 @@ static struct option options[] = {
 	{ "entry-size", 1, NULL, 'S' },
 	{ "trace-file", 1, NULL, 'T' },
 	{ "transaction", 1, NULL, 't' },
+	{ "perm-nb", 1, NULL, 'A' },
 	{ "no-recovery", 0, NULL, 'R' },
 	{ "internal-db", 0, NULL, 'I' },
 	{ "verbose", 0, NULL, 'V' },
@@ -1903,7 +1994,7 @@ int main(int argc, char *argv[])
 	int timeout;
 
 
-	while ((opt = getopt_long(argc, argv, "DE:F:HNPS:t:T:RVW:", options,
+	while ((opt = getopt_long(argc, argv, "DE:F:HNPS:t:A:T:RVW:", options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'D':
@@ -1944,6 +2035,9 @@ int main(int argc, char *argv[])
 			break;
 		case 'W':
 			quota_nb_watch_per_domain = strtol(optarg, NULL, 10);
+			break;
+		case 'A':
+			quota_nb_perms_per_node = strtol(optarg, NULL, 10);
 			break;
 		case 'e':
 			dom0_event = strtol(optarg, NULL, 10);
@@ -2106,8 +2200,9 @@ int main(int argc, char *argv[])
 					if (fds[conn->pollfd_idx].revents
 					    & ~(POLLIN|POLLOUT))
 						talloc_free(conn);
-					else if (fds[conn->pollfd_idx].revents
-						 & POLLIN)
+					else if ((fds[conn->pollfd_idx].revents
+						  & POLLIN) &&
+						 !conn->is_ignored)
 						handle_input(conn);
 				}
 				if (talloc_free(conn) == 0)
@@ -2119,8 +2214,9 @@ int main(int argc, char *argv[])
 					if (fds[conn->pollfd_idx].revents
 					    & ~(POLLIN|POLLOUT))
 						talloc_free(conn);
-					else if (fds[conn->pollfd_idx].revents
-						 & POLLOUT)
+					else if ((fds[conn->pollfd_idx].revents
+						  & POLLOUT) &&
+						 !conn->is_ignored)
 						handle_output(conn);
 				}
 				if (talloc_free(conn) == 0)

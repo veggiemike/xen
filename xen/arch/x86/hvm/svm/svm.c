@@ -987,8 +987,9 @@ static void svm_ctxt_switch_to(struct vcpu *v)
         wrmsr_tsc_aux(v->arch.msrs->tsc_aux);
 }
 
-static void noreturn svm_do_resume(struct vcpu *v)
+static void noreturn svm_do_resume(void)
 {
+    struct vcpu *v = current;
     struct vmcb_struct *vmcb = v->arch.hvm.svm.vmcb;
     bool debug_state = (v->domain->debugger_attached ||
                         v->domain->arch.monitor.software_breakpoint_enabled ||
@@ -1032,7 +1033,7 @@ static void noreturn svm_do_resume(struct vcpu *v)
 
     hvm_do_resume(v);
 
-    reset_stack_and_jump_nolp(svm_asm_do_resume);
+    reset_stack_and_jump(svm_asm_do_resume);
 }
 
 void svm_vmenter_helper(const struct cpu_user_regs *regs)
@@ -1518,8 +1519,7 @@ static void svm_init_erratum_383(const struct cpuinfo_x86 *c)
 
 #ifdef CONFIG_PV
 bool svm_load_segs(unsigned int ldt_ents, unsigned long ldt_base,
-                   unsigned int fs_sel, unsigned long fs_base,
-                   unsigned int gs_sel, unsigned long gs_base,
+                   unsigned long fs_base, unsigned long gs_base,
                    unsigned long gs_shadow)
 {
     unsigned int cpu = smp_processor_id();
@@ -1556,14 +1556,12 @@ bool svm_load_segs(unsigned int ldt_ents, unsigned long ldt_base,
         vmcb->ldtr.base = ldt_base;
     }
 
-    ASSERT(!(fs_sel & ~3));
-    vmcb->fs.sel = fs_sel;
+    vmcb->fs.sel = 0;
     vmcb->fs.attr = 0;
     vmcb->fs.limit = 0;
     vmcb->fs.base = fs_base;
 
-    ASSERT(!(gs_sel & ~3));
-    vmcb->gs.sel = gs_sel;
+    vmcb->gs.sel = 0;
     vmcb->gs.attr = 0;
     vmcb->gs.limit = 0;
     vmcb->gs.base = gs_base;

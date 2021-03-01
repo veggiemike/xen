@@ -134,26 +134,31 @@ let del_watch cons con path token =
 		cons.watches <- Trie.set cons.watches key watches;
  	watch
 
+let del_watches cons con =
+	Connection.del_watches con;
+	cons.watches <- Trie.map (del_watches_of_con con) cons.watches
+
 (* path is absolute *)
-let fire_watches cons path recurse =
+let fire_watches ?oldroot root cons path recurse =
 	let key = key_of_path path in
 	let path = Store.Path.to_string path in
+	let roots = oldroot, root in
 	let fire_watch _ = function
 		| None         -> ()
-		| Some watches -> List.iter (fun w -> Connection.fire_watch w path) watches
+		| Some watches -> List.iter (fun w -> Connection.fire_watch roots w path) watches
 	in
 	let fire_rec _x = function
 		| None         -> ()
 		| Some watches ->
-			  List.iter (fun w -> Connection.fire_single_watch w) watches
+			List.iter (Connection.fire_single_watch roots) watches
 	in
 	Trie.iter_path fire_watch cons.watches key;
 	if recurse then
 		Trie.iter fire_rec (Trie.sub cons.watches key)
 
-let fire_spec_watches cons specpath =
+let fire_spec_watches root cons specpath =
 	iter cons (fun con ->
-		List.iter (fun w -> Connection.fire_single_watch w) (Connection.get_watches con specpath))
+		List.iter (Connection.fire_single_watch (None, root)) (Connection.get_watches con specpath))
 
 let set_target cons domain target_domain =
 	let con = find_domain cons domain in

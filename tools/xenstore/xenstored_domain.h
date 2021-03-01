@@ -56,6 +56,9 @@ bool domain_can_write(struct connection *conn);
 
 bool domain_is_unprivileged(struct connection *conn);
 
+/* Remove node permissions for no longer existing domains. */
+int domain_adjust_node_perms(struct node *node);
+
 /* Quota manipulation */
 void domain_entry_inc(struct connection *conn, struct node *);
 void domain_entry_dec(struct connection *conn, struct node *);
@@ -64,6 +67,11 @@ int domain_entry(struct connection *conn);
 void domain_watch_inc(struct connection *conn);
 void domain_watch_dec(struct connection *conn);
 int domain_watch(struct connection *conn);
+
+/* Special node permission handling. */
+int set_perms_special(struct connection *conn, const char *name,
+		      struct node_perms *perms);
+bool check_perms_special(const char *name, struct connection *conn);
 
 /* Write rate limiting */
 

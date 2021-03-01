@@ -95,12 +95,14 @@ let parse_config filename =
 		("conflict-max-history-seconds", Config.Set_float Define.conflict_max_history_seconds);
 		("conflict-rate-limit-is-aggregate", Config.Set_bool Define.conflict_rate_limit_is_aggregate);
 		("perms-activate", Config.Set_bool Perms.activate);
+		("perms-watch-activate", Config.Set_bool Perms.watch_activate);
 		("quota-activate", Config.Set_bool Quota.activate);
 		("quota-maxwatch", Config.Set_int Define.maxwatch);
 		("quota-transaction", Config.Set_int Define.maxtransaction);
 		("quota-maxentity", Config.Set_int Quota.maxent);
 		("quota-maxsize", Config.Set_int Quota.maxsize);
 		("quota-maxrequests", Config.Set_int Define.maxrequests);
+		("quota-path-max", Config.Set_int Define.path_max);
 		("test-eagain", Config.Set_bool Transaction.test_eagain);
 		("persistent", Config.Set_bool Disk.enable);
 		("xenstored-log-file", Config.String Logging.set_xenstored_log_destination);
@@ -287,6 +289,8 @@ let _ =
 	let quit = ref false in
 
 	Logging.init_xenstored_log();
+	List.iter (fun path ->
+		Store.write store Perms.Connection.full_rights path "") Store.Path.specials;
 
 	let filename = Paths.xen_run_stored ^ "/db" in
 	if cf.restart && Sys.file_exists filename then (
@@ -337,9 +341,12 @@ let _ =
 			finally (fun () ->
 				if Some port = eventchn.Event.virq_port then (
 					let (notify, deaddom) = Domains.cleanup domains in
+					List.iter (Store.reset_permissions store) deaddom;
 					List.iter (Connections.del_domain cons) deaddom;
 					if deaddom <> [] || notify then
-						Connections.fire_spec_watches cons "@releaseDomain"
+						Connections.fire_spec_watches
+							(Store.get_root store)
+							cons Store.Path.release_domain
 				)
 				else
 					let c = Connections.find_domain_by_port cons port in

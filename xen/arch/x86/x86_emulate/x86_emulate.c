@@ -362,7 +362,7 @@ static const struct twobyte_table {
     [0xc1] = { DstMem|SrcReg|ModRM },
     [0xc2] = { DstImplicit|SrcImmByte|ModRM, simd_any_fp, d8s_vl },
     [0xc3] = { DstMem|SrcReg|ModRM|Mov },
-    [0xc4] = { DstReg|SrcImmByte|ModRM, simd_packed_int, 1 },
+    [0xc4] = { DstImplicit|SrcImmByte|ModRM, simd_none, 1 },
     [0xc5] = { DstReg|SrcImmByte|ModRM|Mov },
     [0xc6] = { DstImplicit|SrcImmByte|ModRM, simd_packed_fp, d8s_vl },
     [0xc7] = { ImplicitOps|ModRM },
@@ -2784,7 +2784,7 @@ x86_decode_twobyte(
         /* fall through */
     case X86EMUL_OPC_VEX_66(0, 0xc4): /* vpinsrw */
     case X86EMUL_OPC_EVEX_66(0, 0xc4): /* vpinsrw */
-        state->desc = DstReg | SrcMem16;
+        state->desc = DstImplicit | SrcMem16;
         break;
 
     case 0xf0:
@@ -3368,7 +3368,7 @@ x86_decode(
         {
             generate_exception_if(d & vSIB, EXC_UD);
             modrm_rm |= ((rex_prefix & 1) << 3) |
-                        (evex_encoded() && !evex.x) << 4;
+                        ((evex_encoded() && !evex.x) << 4);
             ea.type = OP_REG;
         }
         else if ( ad_bytes == 2 )
@@ -3415,7 +3415,7 @@ x86_decode(
                     ea.mem.off = insn_fetch_type(int16_t);
                 break;
             case 1:
-                ea.mem.off += insn_fetch_type(int8_t) << disp8scale;
+                ea.mem.off += insn_fetch_type(int8_t) * (1 << disp8scale);
                 break;
             case 2:
                 ea.mem.off += insn_fetch_type(int16_t);
@@ -3477,7 +3477,7 @@ x86_decode(
                 pc_rel = mode_64bit();
                 break;
             case 1:
-                ea.mem.off += insn_fetch_type(int8_t) << disp8scale;
+                ea.mem.off += insn_fetch_type(int8_t) * (1 << disp8scale);
                 break;
             case 2:
                 ea.mem.off += insn_fetch_type(int32_t);
@@ -8587,6 +8587,7 @@ x86_emulate(
         generate_exception_if(vex.l, EXC_UD);
         memcpy(mmvalp, &src.val, 2);
         ea.type = OP_MEM;
+        state->simd_size = simd_other;
         goto simd_0f_int_imm8;
 
 #ifndef X86EMUL_NO_SIMD
@@ -8601,9 +8602,8 @@ x86_emulate(
             host_and_vcpu_must_have(avx512bw);
         if ( !mode_64bit() )
             evex.w = 0;
-        memcpy(mmvalp, &src.val, op_bytes);
+        memcpy(mmvalp, &src.val, src.bytes);
         ea.type = OP_MEM;
-        op_bytes = src.bytes;
         d = SrcMem16; /* Fake for the common SIMD code below. */
         state->simd_size = simd_other;
         goto avx512f_imm8_no_sae;
@@ -9727,7 +9727,7 @@ x86_emulate(
 
                 rc = ops->read(ea.mem.seg,
                                truncate_ea(ea.mem.off +
-                                           (idx << state->sib_scale)),
+                                           idx * (1 << state->sib_scale)),
                                (void *)mmvalp + i * op_bytes, op_bytes, ctxt);
                 if ( rc != X86EMUL_OKAY )
                 {
@@ -9849,7 +9849,8 @@ x86_emulate(
                 continue;
 
             rc = ops->read(ea.mem.seg,
-                           truncate_ea(ea.mem.off + (idx << state->sib_scale)),
+                           truncate_ea(ea.mem.off +
+                                       idx * (1 << state->sib_scale)),
                            (void *)mmvalp + i * op_bytes, op_bytes, ctxt);
             if ( rc != X86EMUL_OKAY )
             {
@@ -10020,7 +10021,8 @@ x86_emulate(
                 continue;
 
             rc = ops->write(ea.mem.seg,
-                            truncate_ea(ea.mem.off + (idx << state->sib_scale)),
+                            truncate_ea(ea.mem.off +
+                                        idx * (1 << state->sib_scale)),
                             (void *)mmvalp + i * op_bytes, op_bytes, ctxt);
             if ( rc != X86EMUL_OKAY )
             {
@@ -10138,7 +10140,7 @@ x86_emulate(
                   ? ops->write
                   : ops->read)(ea.mem.seg,
                                truncate_ea(ea.mem.off +
-                                           (idx << state->sib_scale)),
+                                           idx * (1 << state->sib_scale)),
                                NULL, 0, ctxt);
             if ( rc == X86EMUL_EXCEPTION )
             {
@@ -10764,10 +10766,8 @@ x86_emulate(
     case X86EMUL_OPC_66(0x0f3a, 0x20): /* pinsrb $imm8,r32/m8,xmm */
     case X86EMUL_OPC_66(0x0f3a, 0x22): /* pinsr{d,q} $imm8,r/m,xmm */
         host_and_vcpu_must_have(sse4_1);
-        get_fpu(X86EMUL_FPU_xmm);
-        memcpy(mmvalp, &src.val, op_bytes);
+        memcpy(mmvalp, &src.val, src.bytes);
         ea.type = OP_MEM;
-        op_bytes = src.bytes;
         d = SrcMem16; /* Fake for the common SIMD code below. */
         state->simd_size = simd_other;
         goto simd_0f3a_common;
@@ -10777,9 +10777,8 @@ x86_emulate(
         generate_exception_if(vex.l, EXC_UD);
         if ( !mode_64bit() )
             vex.w = 0;
-        memcpy(mmvalp, &src.val, op_bytes);
+        memcpy(mmvalp, &src.val, src.bytes);
         ea.type = OP_MEM;
-        op_bytes = src.bytes;
         d = SrcMem16; /* Fake for the common SIMD code below. */
         state->simd_size = simd_other;
         goto simd_0f_int_imm8;

@@ -661,7 +661,11 @@ void pv_shim_inject_evtchn(unsigned int port)
     {
         struct evtchn *chn = evtchn_from_port(guest, port);
 
-        evtchn_port_set_pending(guest, chn->notify_vcpu_id, chn);
+        if ( evtchn_read_trylock(chn) )
+        {
+            evtchn_port_set_pending(guest, chn->notify_vcpu_id, chn);
+            evtchn_read_unlock(chn);
+        }
     }
 }
 

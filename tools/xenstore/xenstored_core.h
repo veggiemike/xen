@@ -80,6 +80,9 @@ struct connection
 	/* Is this a read-only connection? */
 	bool can_write;
 
+	/* Is this connection ignored? */
+	bool is_ignored;
+
 	/* Buffered incoming data. */
 	struct buffered_data *in;
 
@@ -109,6 +112,11 @@ struct connection
 };
 extern struct list_head connections;
 
+struct node_perms {
+	unsigned int num;
+	struct xs_permissions *p;
+};
+
 struct node {
 	const char *name;
 
@@ -120,8 +128,7 @@ struct node {
 #define NO_GENERATION ~((uint64_t)0)
 
 	/* Permissions. */
-	unsigned int num_perms;
-	struct xs_permissions *perms;
+	struct node_perms perms;
 
 	/* Contents. */
 	unsigned int datalen;
@@ -148,21 +155,29 @@ void send_ack(struct connection *conn, enum xsd_sockmsg_type type);
 /* Canonicalize this path if possible. */
 char *canonicalize(struct connection *conn, const void *ctx, const char *node);
 
-/* Write a node to the tdb data base. */
-int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node);
+/* Get access permissions. */
+enum xs_perm_type perm_for_conn(struct connection *conn,
+				const struct node_perms *perms);
 
-/* Get this node, checking we have permissions. */
-struct node *get_node(struct connection *conn,
-		      const void *ctx,
-		      const char *name,
-		      enum xs_perm_type perm);
+/* Write a node to the tdb data base. */
+int write_node_raw(struct connection *conn, TDB_DATA *key, struct node *node,
+		   bool no_quota_check);
+
+/* Get a node from the tdb data base. */
+struct node *read_node(struct connection *conn, const void *ctx,
+		       const char *name);
 
 struct connection *new_connection(connwritefn_t *write, connreadfn_t *read);
 void check_store(void);
 void corrupt(struct connection *conn, const char *fmt, ...);
+enum xs_perm_type perm_for_conn(struct connection *conn,
+				const struct node_perms *perms);
 
 /* Is this a valid node name? */
 bool is_valid_nodename(const char *node);
+
+/* Get name of parent node. */
+char *get_parent(const void *ctx, const char *node);
 
 /* Tracing infrastructure. */
 void trace_create(const void *data, const char *type);

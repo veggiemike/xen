@@ -29,6 +29,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <regex.h>
+#include <xen-tools/libs.h>
 
 #include "xenstat_priv.h"
 
@@ -78,8 +79,14 @@ void getBridge(char *excludeName, char *result, size_t resultLen)
 				sprintf(tmp, "/sys/class/net/%s/bridge", de->d_name);
 
 				if (access(tmp, F_OK) == 0) {
-					strncpy(result, de->d_name, resultLen - 1);
-					result[resultLen - 1] = 0;
+					/*
+					 * Do not use strncpy to prevent compiler warning with
+					 * gcc >= 10.0
+					 * If de->d_name is longer then resultLen we truncate it
+					 */
+					memset(result, 0, resultLen);
+					memcpy(result, de->d_name, MIN(strnlen(de->d_name,
+									NAME_MAX),resultLen - 1));
 				}
 		}
 	}

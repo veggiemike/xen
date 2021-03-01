@@ -58,6 +58,7 @@
 #define ARM_CPU_PART_CORTEX_A73     0xD09
 #define ARM_CPU_PART_CORTEX_A75     0xD0A
 #define ARM_CPU_PART_CORTEX_A76     0xD0B
+#define ARM_CPU_PART_NEOVERSE_N1    0xD0C
 
 #define MIDR_CORTEX_A12 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A12)
 #define MIDR_CORTEX_A17 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A17)
@@ -68,6 +69,7 @@
 #define MIDR_CORTEX_A73 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A73)
 #define MIDR_CORTEX_A75 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A75)
 #define MIDR_CORTEX_A76 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_CORTEX_A76)
+#define MIDR_NEOVERSE_N1 MIDR_CPU_MODEL(ARM_CPU_IMP_ARM, ARM_CPU_PART_NEOVERSE_N1)
 
 /* MPIDR Multiprocessor Affinity Register */
 #define _MPIDR_UP           (30)
@@ -349,6 +351,7 @@
 #define VTCR_RES1       (_AC(1,UL)<<31)
 
 /* HCPTR Hyp. Coprocessor Trap Register */
+#define HCPTR_TAM       ((_AC(1,U)<<30))
 #define HCPTR_TTA       ((_AC(1,U)<<20))        /* Trap trace registers */
 #define HCPTR_CP(x)     ((_AC(1,U)<<(x)))       /* Trap Coprocessor x */
 #define HCPTR_CP_MASK   ((_AC(1,U)<<14)-1)

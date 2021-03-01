@@ -89,6 +89,13 @@ let check_owner node connection =
 
 let rec recurse fct node = fct node; List.iter (recurse fct) node.children
 
+(** [recurse_map f tree] applies [f] on each node in the tree recursively *)
+let recurse_map f =
+	let rec walk node =
+		f { node with children = List.rev_map walk node.children |> List.rev }
+	in
+	walk
+
 let unpack node = (Symbol.to_string node.name, node.perms, node.value)
 
 end
@@ -214,6 +221,11 @@ let rec lookup node path fct =
 
 let apply rnode path fct =
 	lookup rnode path fct
+
+let introduce_domain = "@introduceDomain"
+let release_domain = "@releaseDomain"
+let specials = List.map of_string [ introduce_domain; release_domain ]
+
 end
 
 (* The Store.t type *)
@@ -273,15 +285,17 @@ let path_rm store perm path =
 			Node.del_childname node name
 		with Not_found ->
 			raise Define.Doesnt_exist in
-	if path = [] then
+	if path = [] then (
+		Node.check_perm store.root perm Perms.WRITE;
 		Node.del_all_children store.root
-	else
+	) else
 		Path.apply_modify store.root path do_rm
 
 let path_setperms store perm path perms =
-	if path = [] then
+	if path = [] then (
+		Node.check_perm store.root perm Perms.WRITE;
 		Node.set_perms store.root perms
-	else
+	) else
 		let do_setperms node name =
 			let c = Node.find node name in
 			Node.check_owner c perm;
@@ -313,9 +327,10 @@ let read store perm path =
 
 let ls store perm path =
 	let children =
-		if path = [] then
-			(Node.get_children store.root)
-		else
+		if path = [] then (
+			Node.check_perm store.root perm Perms.READ;
+			Node.get_children store.root
+		) else
 			let do_ls node name =
 				let cnode = Node.find node name in
 				Node.check_perm cnode perm Perms.READ;
@@ -324,9 +339,10 @@ let ls store perm path =
 	List.rev (List.map (fun n -> Symbol.to_string n.Node.name) children)
 
 let getperms store perm path =
-	if path = [] then
-		(Node.get_perms store.root)
-	else
+	if path = [] then (
+		Node.check_perm store.root perm Perms.READ;
+		Node.get_perms store.root
+	) else
 		let fct n name =
 			let c = Node.find n name in
 			Node.check_perm c perm Perms.READ;
@@ -421,10 +437,20 @@ let setperms store perm path nperms =
 	| Some node ->
 		let old_owner = Node.get_owner node in
 		let new_owner = Perms.Node.get_owner nperms in
-		if not ((old_owner = new_owner) || (Perms.Connection.is_dom0 perm)) then Quota.check store.quota new_owner 0;
+		if not ((old_owner = new_owner) || (Perms.Connection.is_dom0 perm)) then
+			raise Define.Permission_denied;
 		store.root <- path_setperms store perm path nperms;
 		Quota.del_entry store.quota old_owner;
 		Quota.add_entry store.quota new_owner
+
+let reset_permissions store domid =
+	Logging.info "store|node" "Cleaning up xenstore ACLs for domid %d" domid;
+	store.root <- Node.recurse_map (fun node ->
+		let perms = Perms.Node.remove_domid ~domid node.perms in
+		if perms <> node.perms then
+			Logging.debug "store|node" "Changed permissions for node %s" (Node.get_name node);
+		{ node with perms }
+	) store.root
 
 type ops = {
 	store: t;

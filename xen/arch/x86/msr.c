@@ -130,6 +130,22 @@ int init_domain_msr_policy(struct domain *d)
     if ( !opt_dom0_cpuid_faulting && is_control_domain(d) && is_pv_domain(d) )
         mp->platform_info.cpuid_faulting = false;
 
+    /*
+     * Expose the "hardware speculation behaviour" bits of ARCH_CAPS to dom0,
+     * so dom0 can turn off workarounds as appropriate.  Temporary, until the
+     * domain policy logic gains a better understanding of MSRs.
+     */
+    if ( is_hardware_domain(d) && boot_cpu_has(X86_FEATURE_ARCH_CAPS) )
+    {
+        uint64_t val;
+
+        rdmsrl(MSR_ARCH_CAPABILITIES, val);
+
+        mp->arch_caps.raw = val &
+            (ARCH_CAPS_RDCL_NO | ARCH_CAPS_IBRS_ALL | ARCH_CAPS_RSBA |
+             ARCH_CAPS_SSB_NO | ARCH_CAPS_MDS_NO | ARCH_CAPS_TAA_NO);
+    }
+
     d->arch.msr = mp;
 
     return 0;
@@ -169,6 +185,13 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
     case MSR_TSX_CTRL:
     case MSR_MCU_OPT_CTRL:
     case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
+    case MSR_RAPL_POWER_UNIT:
+    case MSR_PKG_POWER_LIMIT  ... MSR_PKG_POWER_INFO:
+    case MSR_DRAM_POWER_LIMIT ... MSR_DRAM_POWER_INFO:
+    case MSR_PP0_POWER_LIMIT  ... MSR_PP0_POLICY:
+    case MSR_PP1_POWER_LIMIT  ... MSR_PP1_POLICY:
+    case MSR_PLATFORM_ENERGY_COUNTER:
+    case MSR_PLATFORM_POWER_LIMIT:
     case MSR_U_CET:
     case MSR_S_CET:
     case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:
@@ -176,6 +199,8 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
     case MSR_AMD64_LWP_CBADDR:
     case MSR_PPIN_CTL:
     case MSR_PPIN:
+    case MSR_F15H_CU_POWER ... MSR_F15H_CU_MAX_POWER:
+    case MSR_AMD_RAPL_POWER_UNIT ... MSR_AMD_PKG_ENERGY_STATUS:
     case MSR_AMD_PPIN_CTL:
     case MSR_AMD_PPIN:
         /* Not offered to guests. */
@@ -220,12 +245,33 @@ int guest_rdmsr(struct vcpu *v, uint32_t msr, uint64_t *val)
         break;
 
     case MSR_ARCH_CAPABILITIES:
-        /* Not implemented yet. */
-        goto gp_fault;
+        if ( !cp->feat.arch_caps )
+            goto gp_fault;
+        *val = mp->arch_caps.raw;
+        break;
 
     case MSR_INTEL_MISC_FEATURES_ENABLES:
         *val = msrs->misc_features_enables.raw;
         break;
+
+        /*
+         * These MSRs are not enumerated in CPUID.  They have been around
+         * since the Pentium 4, and implemented by other vendors.
+         *
+         * Some versions of Windows try reading these before setting up a #GP
+         * handler, and Linux has several unguarded reads as well.  Provide
+         * RAZ semantics, in general, but permit a cpufreq controller dom0 to
+         * have full access.
+         */
+    case MSR_IA32_PERF_STATUS:
+    case MSR_IA32_PERF_CTL:
+        if ( !(cp->x86_vendor & (X86_VENDOR_INTEL | X86_VENDOR_CENTAUR)) )
+            goto gp_fault;
+
+        *val = 0;
+        if ( likely(!is_cpufreq_controller(d)) || rdmsr_safe(msr, *val) == 0 )
+            break;
+        goto gp_fault;
 
     case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
         if ( !is_hvm_domain(d) || v != curr )
@@ -325,12 +371,20 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     case MSR_INTEL_CORE_THREAD_COUNT:
     case MSR_INTEL_PLATFORM_INFO:
     case MSR_ARCH_CAPABILITIES:
+    case MSR_IA32_PERF_STATUS:
         /* Read-only */
     case MSR_TEST_CTRL:
     case MSR_TSX_FORCE_ABORT:
     case MSR_TSX_CTRL:
     case MSR_MCU_OPT_CTRL:
     case MSR_RTIT_OUTPUT_BASE ... MSR_RTIT_ADDR_B(7):
+    case MSR_RAPL_POWER_UNIT:
+    case MSR_PKG_POWER_LIMIT  ... MSR_PKG_POWER_INFO:
+    case MSR_DRAM_POWER_LIMIT ... MSR_DRAM_POWER_INFO:
+    case MSR_PP0_POWER_LIMIT  ... MSR_PP0_POLICY:
+    case MSR_PP1_POWER_LIMIT  ... MSR_PP1_POLICY:
+    case MSR_PLATFORM_ENERGY_COUNTER:
+    case MSR_PLATFORM_POWER_LIMIT:
     case MSR_U_CET:
     case MSR_S_CET:
     case MSR_PL0_SSP ... MSR_INTERRUPT_SSP_TABLE:
@@ -338,6 +392,8 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
     case MSR_AMD64_LWP_CBADDR:
     case MSR_PPIN_CTL:
     case MSR_PPIN:
+    case MSR_F15H_CU_POWER ... MSR_F15H_CU_MAX_POWER:
+    case MSR_AMD_RAPL_POWER_UNIT ... MSR_AMD_PKG_ENERGY_STATUS:
     case MSR_AMD_PPIN_CTL:
     case MSR_AMD_PPIN:
         /* Not offered to guests. */
@@ -435,6 +491,21 @@ int guest_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
             ctxt_switch_levelling(v);
         break;
     }
+
+        /*
+         * This MSR is not enumerated in CPUID.  It has been around since the
+         * Pentium 4, and implemented by other vendors.
+         *
+         * To match the RAZ semantics, implement as write-discard, except for
+         * a cpufreq controller dom0 which has full access.
+         */
+    case MSR_IA32_PERF_CTL:
+        if ( !(cp->x86_vendor & (X86_VENDOR_INTEL | X86_VENDOR_CENTAUR)) )
+            goto gp_fault;
+
+        if ( likely(!is_cpufreq_controller(d)) || wrmsr_safe(msr, val) == 0 )
+            break;
+        goto gp_fault;
 
     case MSR_X2APIC_FIRST ... MSR_X2APIC_LAST:
         if ( !is_hvm_domain(d) || v != curr )

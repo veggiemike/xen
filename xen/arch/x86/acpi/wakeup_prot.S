@@ -1,3 +1,4 @@
+#include <asm/asm_defns.h>
 #include <asm/msr-index.h>
 #include <asm/page.h>
 #include <asm/processor.h>
@@ -49,6 +50,10 @@ ENTRY(s3_resume)
         mov     %rax, %cr0
 
         mov     $__HYPERVISOR_DS64, %eax
+        mov     %eax, %ds
+        mov     %eax, %es
+        mov     %eax, %fs
+        mov     %eax, %gs
         mov     %eax, %ss
         mov     saved_rsp(%rip), %rsp
 
@@ -65,7 +70,7 @@ ENTRY(s3_resume)
          * so SETSSBSY will successfully load a value useful for us, then
          * reset MSR_PL0_SSP to its usual value and pop the temporary token.
          */
-        mov     saved_rsp(%rip), %rdi
+        mov     saved_ssp(%rip), %rdi
         cmpq    $1, %rdi
         je      .L_shstk_done
 
@@ -105,6 +110,11 @@ ENTRY(s3_resume)
 #endif
 
         call    load_system_tables
+
+        /* Restore CR4 from the cpuinfo block. */
+        GET_STACK_END(bx)
+        mov     STACK_CPUINFO_FIELD(cr4)(%rbx), %rax
+        mov     %rax, %cr4
 
 .Lsuspend_err:
         pop     %r15
