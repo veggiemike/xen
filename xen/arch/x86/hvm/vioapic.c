@@ -539,12 +539,12 @@ void vioapic_update_EOI(struct domain *d, u8 vector)
             if ( is_iommu_enabled(d) )
             {
                 spin_unlock(&d->arch.hvm.irq_lock);
-                hvm_dpci_eoi(d, vioapic->base_gsi + pin, ent);
+                hvm_dpci_eoi(d, vioapic->base_gsi + pin);
                 spin_lock(&d->arch.hvm.irq_lock);
             }
 
             if ( (ent->fields.trig_mode == VIOAPIC_LEVEL_TRIG) &&
-                 !ent->fields.mask &&
+                 !ent->fields.mask && !ent->fields.remote_irr &&
                  hvm_irq->gsi_assert_count[vioapic->base_gsi + pin] )
             {
                 ent->fields.remote_irr = 1;

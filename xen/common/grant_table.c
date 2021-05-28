@@ -836,9 +836,10 @@ static int _set_status_v2(const grant_entry_header_t *shah,
         mask |= GTF_sub_page;
 
     /* If not already pinned, check the grant domid and type. */
-    if ( !act->pin && ((((scombo.flags & mask) != GTF_permit_access) &&
-                        ((scombo.flags & mask) != GTF_transitive)) ||
-                       (scombo.domid != ldomid)) )
+    if ( !act->pin &&
+         ((((scombo.flags & mask) != GTF_permit_access) &&
+           (mapflag || ((scombo.flags & mask) != GTF_transitive))) ||
+          (scombo.domid != ldomid)) )
         PIN_FAIL(done, GNTST_general_error,
                  "Bad flags (%x) or dom (%d); expected d%d, flags %x\n",
                  scombo.flags, scombo.domid, ldomid, mask);
@@ -864,7 +865,7 @@ static int _set_status_v2(const grant_entry_header_t *shah,
     if ( !act->pin )
     {
         if ( (((scombo.flags & mask) != GTF_permit_access) &&
-              ((scombo.flags & mask) != GTF_transitive)) ||
+              (mapflag || ((scombo.flags & mask) != GTF_transitive))) ||
              (scombo.domid != ldomid) ||
              (!readonly && (scombo.flags & GTF_readonly)) )
         {
@@ -1206,7 +1207,14 @@ map_grant_ref(
         goto undo_out;
     }
 
-    need_iommu = gnttab_need_iommu_mapping(ld);
+    /*
+     * This is deliberately not checking the page's owner: get_paged_frame()
+     * explicitly rejects foreign pages, and all success paths above yield
+     * either owner == rd or owner == dom_io (the dom_cow case is irrelevant
+     * as mem-sharing and IOMMU use are incompatible). The dom_io case would
+     * need checking separately if we compared against owner here.
+     */
+    need_iommu = ld != rd && gnttab_need_iommu_mapping(ld);
     if ( need_iommu )
     {
         unsigned int kind;
@@ -1470,7 +1478,8 @@ unmap_common(
     if ( put_handle )
         put_maptrack_handle(lgt, op->handle);
 
-    if ( rc == GNTST_okay && gnttab_need_iommu_mapping(ld) )
+    /* See the respective comment in map_grant_ref(). */
+    if ( rc == GNTST_okay && ld != rd && gnttab_need_iommu_mapping(ld) )
     {
         unsigned int kind;
         int err = 0;

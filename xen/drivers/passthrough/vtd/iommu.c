@@ -333,10 +333,9 @@ static void iommu_flush_write_buffer(struct vtd_iommu *iommu)
 }
 
 /* return value determine if we need a write buffer flush */
-static int __must_check flush_context_reg(struct vtd_iommu *iommu, u16 did,
-                                          u16 source_id, u8 function_mask,
-                                          u64 type,
-                                          bool flush_non_present_entry)
+int vtd_flush_context_reg(struct vtd_iommu *iommu, uint16_t did,
+                          uint16_t source_id, uint8_t function_mask,
+                          uint64_t type, bool flush_non_present_entry)
 {
     u64 val = 0;
     unsigned long flags;
@@ -402,11 +401,9 @@ static int __must_check iommu_flush_context_device(struct vtd_iommu *iommu,
 }
 
 /* return value determine if we need a write buffer flush */
-static int __must_check flush_iotlb_reg(struct vtd_iommu *iommu, u16 did,
-                                        u64 addr,
-                                        unsigned int size_order, u64 type,
-                                        bool flush_non_present_entry,
-                                        bool flush_dev_iotlb)
+int vtd_flush_iotlb_reg(struct vtd_iommu *iommu, uint16_t did, uint64_t addr,
+                        unsigned int size_order, uint64_t type,
+                        bool flush_non_present_entry, bool flush_dev_iotlb)
 {
     int tlb_offset = ecap_iotlb_offset(iommu->ecap);
     u64 val = 0;
@@ -1163,10 +1160,10 @@ int __init iommu_alloc(struct acpi_drhd_unit *drhd)
     unsigned long sagaw, nr_dom;
     int agaw;
 
-    if ( nr_iommus > MAX_IOMMUS )
+    if ( nr_iommus >= MAX_IOMMUS )
     {
         dprintk(XENLOG_ERR VTDPREFIX,
-                 "IOMMU: nr_iommus %d > MAX_IOMMUS\n", nr_iommus);
+                "IOMMU: nr_iommus %d > MAX_IOMMUS\n", nr_iommus + 1);
         return -ENOMEM;
     }
 
@@ -2112,7 +2109,7 @@ static int adjust_vtd_irq_affinities(void)
 }
 __initcall(adjust_vtd_irq_affinities);
 
-static int __must_check init_vtd_hw(void)
+static int __must_check init_vtd_hw(bool resume)
 {
     struct acpi_drhd_unit *drhd;
     struct vtd_iommu *iommu;
@@ -2121,7 +2118,7 @@ static int __must_check init_vtd_hw(void)
     u32 sts;
 
     /*
-     * Basic VT-d HW init: set VT-d interrupt, clear VT-d faults.  
+     * Basic VT-d HW init: set VT-d interrupt, clear VT-d faults, etc.
      */
     for_each_drhd_unit ( drhd )
     {
@@ -2130,6 +2127,20 @@ static int __must_check init_vtd_hw(void)
         iommu = drhd->iommu;
 
         clear_fault_bits(iommu);
+
+        /*
+         * Disable interrupt remapping and queued invalidation if
+         * already enabled by BIOS in case we've not initialized it yet.
+         */
+        if ( !iommu_x2apic_enabled )
+        {
+            disable_intremap(iommu);
+            disable_qinval(iommu);
+        }
+
+        if ( resume )
+            /* FECTL write done by vtd_resume(). */
+            continue;
 
         spin_lock_irqsave(&iommu->register_lock, flags);
         sts = dmar_readl(iommu->reg, DMAR_FECTL_REG);
@@ -2150,8 +2161,8 @@ static int __must_check init_vtd_hw(void)
          */
         if ( enable_qinval(iommu) != 0 )
         {
-            iommu->flush.context = flush_context_reg;
-            iommu->flush.iotlb   = flush_iotlb_reg;
+            iommu->flush.context = vtd_flush_context_reg;
+            iommu->flush.iotlb   = vtd_flush_iotlb_reg;
         }
     }
 
@@ -2330,7 +2341,7 @@ static int __init vtd_setup(void)
     P(iommu_hap_pt_share, "Shared EPT tables");
 #undef P
 
-    ret = init_vtd_hw();
+    ret = init_vtd_hw(false);
     if ( ret )
         goto error;
 
@@ -2601,7 +2612,22 @@ static void vtd_resume(void)
     if ( !iommu_enabled )
         return;
 
-    if ( init_vtd_hw() != 0  && force_iommu )
+    for_each_drhd_unit ( drhd )
+    {
+        iommu = drhd->iommu;
+        i = iommu->index;
+
+        spin_lock_irqsave(&iommu->register_lock, flags);
+        dmar_writel(iommu->reg, DMAR_FEDATA_REG,
+                    iommu_state[i][DMAR_FEDATA_REG]);
+        dmar_writel(iommu->reg, DMAR_FEADDR_REG,
+                    iommu_state[i][DMAR_FEADDR_REG]);
+        dmar_writel(iommu->reg, DMAR_FEUADDR_REG,
+                    iommu_state[i][DMAR_FEUADDR_REG]);
+        spin_unlock_irqrestore(&iommu->register_lock, flags);
+    }
+
+    if ( init_vtd_hw(true) != 0 && force_iommu )
          panic("IOMMU setup failed, crash Xen for security purpose\n");
 
     for_each_drhd_unit ( drhd )
@@ -2612,12 +2638,6 @@ static void vtd_resume(void)
         spin_lock_irqsave(&iommu->register_lock, flags);
         dmar_writel(iommu->reg, DMAR_FECTL_REG,
                     (u32) iommu_state[i][DMAR_FECTL_REG]);
-        dmar_writel(iommu->reg, DMAR_FEDATA_REG,
-                    (u32) iommu_state[i][DMAR_FEDATA_REG]);
-        dmar_writel(iommu->reg, DMAR_FEADDR_REG,
-                    (u32) iommu_state[i][DMAR_FEADDR_REG]);
-        dmar_writel(iommu->reg, DMAR_FEUADDR_REG,
-                    (u32) iommu_state[i][DMAR_FEUADDR_REG]);
         spin_unlock_irqrestore(&iommu->register_lock, flags);
 
         iommu_enable_translation(drhd);

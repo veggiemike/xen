@@ -186,6 +186,25 @@ config ARM64_ERRATUM_819472
 
 	  If unsure, say Y.
 
+config ARM64_ERRATUM_843419
+	bool "Cortex-A53: 843419: A load or store might access an incorrect address"
+	default y
+	depends on ARM_64
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 843419 on Cortex-A53 parts up to r0p4.
+
+	  When executing in AArch64 state, a load or store instruction which uses
+	  the result of an ADRP instruction as a base register, or which uses a
+	  base register written by an instruction immediately after an ADRP to the
+	  same register, might access an incorrect address.
+
+	  The workaround enables the linker to check if the affected sequence is
+	  produced and it will fix it with an alternative not affected sequence
+	  that produce the same behavior.
+
+	  If unsure, say Y.
+
 config ARM64_ERRATUM_832075
 	bool "Cortex-A57: 832075: possible deadlock on mixing exclusive memory accesses with device loads"
 	default y
@@ -220,6 +239,24 @@ config ARM64_ERRATUM_834220
 
 	  The workaround is to verify that the Stage 1 translation
 	  doesn't generate a fault before handling the Stage 2 fault.
+	  Please note that this does not necessarily enable the workaround,
+	  as it depends on the alternative framework, which will only patch
+	  the kernel if an affected CPU is detected.
+
+	  If unsure, say Y.
+
+config ARM_ERRATUM_858921
+	bool "Cortex-A73: 858921: Possible wrong read value for CNTVCT or CNTPCT"
+	default y
+	help
+	  This option adds an alternative code sequence to work around ARM
+	  erratum 858921 on Cortex-A73 (all versions).
+
+	  Affected Cortex-A73 might return wrong read value for CNTVCT or CNTPCT
+	  when the counter crosses a 32bit boundary.
+
+	  The workaround involves performing the read twice, and to return
+	  one or the other value depending on whether a transition has taken place.
 	  Please note that this does not necessarily enable the workaround,
 	  as it depends on the alternative framework, which will only patch
 	  the kernel if an affected CPU is detected.

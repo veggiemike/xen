@@ -53,6 +53,7 @@
 extern unsigned long hpet_address;
 extern u8 hpet_blockid;
 extern u8 hpet_flags;
+extern int8_t opt_hpet_legacy_replacement;
 
 /*
  * Detect and initialise HPET hardware: return counter update frequency.
@@ -71,6 +72,18 @@ void hpet_disable(void);
  * Returns 1 if tick originated from HPET; else 0.
  */
 int hpet_legacy_irq_tick(void);
+
+/*
+ * Try to enable HPET Legacy Replacement mode.  Returns a boolean indicating
+ * whether the HPET configuration was changed.
+ */
+bool hpet_enable_legacy_replacement_mode(void);
+
+/*
+ * Undo the effects of hpet_disable_legacy_replacement_mode().  Must not be
+ * called unless enable() returned true.
+ */
+void hpet_disable_legacy_replacement_mode(void);
 
 /*
  * Temporarily use an HPET event counter for timer interrupt handling,

@@ -111,7 +111,7 @@ static bool_t verify_patch_size(uint32_t patch_size)
 #define F15H_MPB_MAX_SIZE 4096
 #define F16H_MPB_MAX_SIZE 3458
 #define F17H_MPB_MAX_SIZE 3200
-#define F19H_MPB_MAX_SIZE 4800
+#define F19H_MPB_MAX_SIZE 5568
 
     switch (boot_cpu_data.x86)
     {
@@ -346,6 +346,7 @@ static struct microcode_patch *cpu_request_microcode(const void *buf, size_t siz
             if ( size < sizeof(*mc) ||
                  (mc = buf)->type != UCODE_UCODE_TYPE ||
                  size - sizeof(*mc) < mc->len ||
+                 mc->len < sizeof(struct microcode_patch) ||
                  (!skip_ucode && !verify_patch_size(mc->len)) )
             {
                 printk(XENLOG_ERR "microcode: Bad microcode data\n");
