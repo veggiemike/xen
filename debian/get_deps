@@ -24,11 +24,17 @@ if [ -z "$libs" ]; then
     exit 0
 fi
 
-pkgs=$(dpkg -S $libs | awk -F: '{print $1}' | sort | uniq)
-if [ -z "$pkgs" ]; then
-    echo >>/dev/stderr "libs detected, but no pkgs found... you have problems"
-    exit 1
-fi
+pkgs=
+for lib in $libs; do
+    # try both $lib and potential symlink target of $lib at the same time
+    pkg=$(dpkg -S $lib $(realpath $lib) | awk -F: '{print $1}')
+    if [ -z "$pkg" ]; then
+	echo >>/dev/stderr "lib detected, but no pkgs found... you have problems"
+	exit 1
+    fi
+    pkgs+=" $pkg"
+done
+pkgs=$(echo $pkgs | xargs -n1 | sort | uniq)
 
 echo
 echo pkgs: $(echo $pkgs | sed 's| |, |g')

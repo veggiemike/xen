@@ -5,6 +5,7 @@ Priority: optional
 Architecture: __arch__
 Installed-Size: __size__
 Depends: bash, __deplibs__
+Replaces: xen-hypervisor, xen-system, xen-utils, xen-utils-common, libxenmisc4.11, libxendevicemodel1, libxencall1, libxenevtchn1, libxenforeignmemory1, libxengnttab1, xenstore-utils, libxenstore3.0, libxentoolcore1, libxentoollog1
 Maintainer: Michael D Labriola <michael.d.labriola@gmail.com>
 Homepage: http://xenproject.org
 Description: Xen Hypervisor and userland tools

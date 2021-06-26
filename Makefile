@@ -335,7 +335,10 @@ xenversion:
 # occasionally making .pkg files to install, now documented/automated
 # to make life easier.
 PACKAGE_VERSION=$(shell $(MAKE) -C xen xenversion --no-print-directory)
-DEBNAME=xen_$(PACKAGE_VERSION)-1
+DEBREV=1
+DEBVERSION=$(PACKAGE_VERSION)-$(DEBREV)
+DEBNAME=xen_$(DEBVERSION)
+
 DEBFILE=$(XEN_ROOT)/$(DEBNAME).deb
 DPKGDIR=$(XEN_ROOT)/$(DEBNAME)
 DEBDIR=$(DPKGDIR)/DEBIAN
@@ -356,6 +359,12 @@ $(DEBFILE): $(DEBCTRL)
 
 $(DPKGDIR):
 	$(MAKE) DESTDIR=$@ install
+	# include a couple more files
+	$(MKDIR_P) $@/etc/default/grub.d
+	cp debian/grub-xen.cfg $@/etc/default/grub.d/xen.cfg
+	# put the .efi file(s) in /boot
+	mv $@/usr/lib64/efi/*.efi $@/boot/
+	rmdir -p --ignore-fail-on-non-empty $@/usr/lib64/efi
 
 $(DEBDIR): $(DPKGDIR)
 	$(MKDIR_P) $@
@@ -373,7 +382,7 @@ $(DEBDEPS): $(DEBDIR)
 
 $(DEBCTRL): $(DEBCTRL_DEPS)
 	cat $(XEN_ROOT)/debian/control | sed \
-	    -e 's|__version__|$(PACKAGE_VERSION)|' \
+	    -e 's|__version__|$(DEBVERSION)|' \
 	    -e "s|__size__|$$(cat $(DEBDIR)/.size)|" \
             -e "s|__arch__|$$(cat $(DEBDIR)/.arch)|" \
             -e "s|__deplibs__|$$(cat $(DEBDIR)/.deps)|" \
