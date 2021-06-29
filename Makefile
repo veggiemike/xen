@@ -335,7 +335,7 @@ xenversion:
 # occasionally making .pkg files to install, now documented/automated
 # to make life easier.
 PACKAGE_VERSION=$(shell $(MAKE) -C xen xenversion --no-print-directory)
-DEBREV=1
+DEBREV=2
 DEBVERSION=$(PACKAGE_VERSION)-$(DEBREV)
 DEBNAME=xen_$(DEBVERSION)
 
@@ -365,6 +365,10 @@ $(DPKGDIR):
 	# put the .efi file(s) in /boot
 	mv $@/usr/lib64/efi/*.efi $@/boot/
 	rmdir -p --ignore-fail-on-non-empty $@/usr/lib64/efi
+	# remove the symlinks in /boot
+	for x in $@/boot/*; do \
+	    [ -h $$x ] && rm -v $$x ; \
+	done
 
 $(DEBDIR): $(DPKGDIR)
 	$(MKDIR_P) $@
