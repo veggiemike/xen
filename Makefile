@@ -372,6 +372,10 @@ $(DEBFILE): $(DEBCTRL)
 	rm -rf $(DPKGDIR)
 
 $(DPKGDIR):
+	./configure --disable-kernels --enable-systemd \
+	    --with-systemd=/lib/systemd/system --prefix=/usr
+	$(MAKE) clean
+	$(MAKE) dist
 	$(MAKE) DESTDIR=$@ install
 	# include a couple more files
 	$(MKDIR_P) $@/etc/default/grub.d
