@@ -380,6 +380,10 @@ $(DPKGDIR):
 	# put the .efi file(s) in /boot
 	mv $@/usr/lib64/efi/*.efi $@/boot/
 	rmdir -p --ignore-fail-on-non-empty $@/usr/lib64/efi
+	# remove the symlinks in /boot
+	for x in $@/boot/*; do \
+	    [ -h $$x ] && rm -v $$x ; \
+	done
 
 $(DEBDIR): $(DPKGDIR)
 	$(MKDIR_P) $@
