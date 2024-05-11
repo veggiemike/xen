@@ -16,3 +16,6 @@ Description: Xen Hypervisor and userland tools
  GPL. Since its initial public release, Xen has grown a large
  development community, spearheaded by xenproject.org
  (http://www.xenproject.org).
+ .
+ This package provides the hypervisor and entire userland installation
+ for Xen.
