@@ -350,7 +350,7 @@ FORCE:
 # occasionally making .pkg files to install, now documented/automated
 # to make life easier.
 PACKAGE_VERSION=$(shell $(MAKE) -C xen xenversion --no-print-directory)
-DEBREV=3
+DEBREV=4
 DEBVERSION=$(PACKAGE_VERSION)-$(DEBREV)
 DEBNAME=xen_$(DEBVERSION)
 DEBFILE=$(XEN_ROOT)/$(DEBNAME).deb

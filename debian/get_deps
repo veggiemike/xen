@@ -28,16 +28,18 @@ pkgs=
 missing=
 for l in $libs; do
     # try the lib as reported by ldd
-    #echo trying $l
-    p=$(dpkg -S $l 2>/dev/null | awk -F: '{print $1}')
+    #echo trying: dpkg -S $l
+    p=$(dpkg -S $l 2>/dev/null | awk -F: '!/^diversion by/ {print $1}')
     if [ -n "$p" ]; then
+        #echo got: $p
         pkgs+=" $p"
         continue
     fi
     # try canonicalized lib name
-    #echo trying $(realpath $l)
-    p=$(dpkg -S $(realpath $l) 2>/dev/null | awk -F: '{print $1}')
+    #echo trying canonicalized: dpkg -S $(realpath $l)
+    p=$(dpkg -S $(realpath $l) 2>/dev/null | awk -F: '!/^diversion by/ {print $1}')
     if [ -n "$p" ]; then
+        #echo got: $p
         pkgs+=" $p"
         continue
     fi
