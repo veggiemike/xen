@@ -392,7 +392,7 @@ $(DEBDIR): $(DPKGDIR)
 	$(MKDIR_P) $@
 
 $(DEBSIZE): $(DEBDIR)
-	du -hs $(DPKGDIR) | awk '{print $$1}' > $@
+	du -s $(DPKGDIR) | awk '{print $$1}' > $@
 
 $(DEBARCH): $(DEBDIR)
 	dpkg-architecture --query DEB_HOST_ARCH > $@
